@@ -22,9 +22,9 @@ import {
   sendLongCommand,
   pollForExit,
   closeSurface,
-  shellEscape,
   readScreen,
-} from "./tmux.ts";
+} from "./mux.ts";
+import { shellEscape } from "./tmux.ts";
 
 import {
   countSessionEntryLines,

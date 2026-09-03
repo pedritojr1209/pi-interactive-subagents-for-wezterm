@@ -2676,3 +2676,184 @@ describe("tmux.ts", () => {
     });
   });
 });
+
+// ── mux.ts (ADR 0001 dispatcher) ──
+
+import {
+  getActiveMux,
+  isMuxAvailable as muxIsMuxAvailable,
+  muxSetupHint as muxHint,
+  getParentSurfaceId,
+  _muxAvailability,
+  _resetMuxForTesting,
+} from "../pi-extension/subagents/mux.ts";
+
+/**
+ * Tests that exercise the `PI_SUBAGENT_MUX` env-var permutations must
+ * reset the dispatcher's memoized resolution between cases — the
+ * production code caches it for the lifetime of the module.
+ */
+describe("mux.ts", () => {
+  const ENV_KEYS = ["PI_SUBAGENT_MUX", "WEZTERM_PANE", "TMUX", "TMUX_PANE"] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  before(() => {
+    for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
+  });
+  after(() => {
+    for (const k of ENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+    _resetMuxForTesting();
+  });
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+    _resetMuxForTesting();
+  });
+
+  describe("getActiveMux selection precedence", () => {
+    it("PI_SUBAGENT_MUX=wezterm overrides everything (wezterm wins even with no env vars)", () => {
+      process.env.PI_SUBAGENT_MUX = "wezterm";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "wezterm");
+      assert.equal(source, "override");
+    });
+
+    it("PI_SUBAGENT_MUX=tmux overrides everything (tmux wins even when WEZTERM_PANE is set)", () => {
+      process.env.PI_SUBAGENT_MUX = "tmux";
+      process.env.WEZTERM_PANE = "3";
+      process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "tmux");
+      assert.equal(source, "override");
+    });
+
+    it("auto: WEZTERM_PANE wins over TMUX when both are set", () => {
+      process.env.WEZTERM_PANE = "3";
+      process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "wezterm");
+      assert.equal(source, "wezterm-env");
+    });
+
+    it("auto: TMUX alone selects tmux", () => {
+      process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "tmux");
+      assert.equal(source, "tmux-env");
+    });
+
+    it("auto: WEZTERM_PANE alone selects wezterm", () => {
+      process.env.WEZTERM_PANE = "3";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "wezterm");
+      assert.equal(source, "wezterm-env");
+    });
+
+    it("auto: neither env var set falls back to tmux", () => {
+      const { active, source } = getActiveMux();
+      assert.equal(active, "tmux");
+      assert.equal(source, "auto-fallback");
+    });
+
+    it("PI_SUBAGENT_MUX=garbage falls through to auto-detection safely", () => {
+      process.env.PI_SUBAGENT_MUX = "wezterminator";
+      process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "tmux");
+      assert.equal(source, "tmux-env");
+    });
+
+    it("PI_SUBAGENT_MUX= (empty string) is treated as auto", () => {
+      process.env.PI_SUBAGENT_MUX = "";
+      process.env.WEZTERM_PANE = "3";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "wezterm");
+      assert.equal(source, "wezterm-env");
+    });
+
+    it("empty WEZTERM_PANE does not count as set (avoid WezTerm server talking to itself)", () => {
+      process.env.WEZTERM_PANE = "";
+      process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "tmux");
+      assert.equal(source, "tmux-env");
+    });
+  });
+
+  describe("_muxAvailability", () => {
+    it("reports the active mux, source, and echoes PI_SUBAGENT_MUX when set", () => {
+      process.env.PI_SUBAGENT_MUX = "tmux";
+      const result = _muxAvailability();
+      assert.equal(result.active, "tmux");
+      assert.equal(result.source, "override");
+      assert.equal(result.piSubagentMux, "tmux");
+      assert.deepEqual(Object.keys(result.envVar).sort(), ["tmux", "weztermPane"]);
+    });
+
+    it("omits piSubagentMux when the env var is unset", () => {
+      delete process.env.PI_SUBAGENT_MUX;
+      const result = _muxAvailability();
+      assert.equal(result.piSubagentMux, undefined);
+      assert.equal("piSubagentMux" in result, false);
+    });
+  });
+
+  describe("isMuxAvailable", () => {
+    it("returns the per-mux availability, not a constant", () => {
+      delete process.env.PI_SUBAGENT_MUX;
+      delete process.env.TMUX;
+      delete process.env.WEZTERM_PANE;
+      const noEnv = muxIsMuxAvailable();
+      assert.equal(typeof noEnv, "boolean");
+    });
+
+    it("ignores the per-mux isMuxAvailable import on tmux.ts (we test through the dispatcher)", () => {
+      // Sanity: the dispatcher's `isMuxAvailable` is the one exported from mux.ts.
+      process.env.PI_SUBAGENT_MUX = "wezterm";
+      const r1 = muxIsMuxAvailable();
+      // Same call twice — memoized at the per-mux layer is OK; dispatcher is stable.
+      const r2 = muxIsMuxAvailable();
+      assert.equal(r1, r2);
+    });
+  });
+
+  describe("muxSetupHint", () => {
+    it("returns a non-empty string regardless of selection", () => {
+      process.env.PI_SUBAGENT_MUX = "wezterm";
+      const w = muxHint();
+      assert.ok(typeof w === "string" && w.length > 0);
+      _resetMuxForTesting();
+      process.env.PI_SUBAGENT_MUX = "tmux";
+      const t = muxHint();
+      assert.ok(typeof t === "string" && t.length > 0);
+      // The hints should differ (wezterm hints about wezterm, tmux about tmux).
+      assert.notEqual(w, t);
+    });
+  });
+
+  describe("getParentSurfaceId", () => {
+    it("returns TMUX_PANE when active is tmux", () => {
+      process.env.PI_SUBAGENT_MUX = "tmux";
+      process.env.TMUX_PANE = "%7";
+      assert.equal(getParentSurfaceId(), "%7");
+    });
+
+    it("returns WEZTERM_PANE when active is wezterm", () => {
+      process.env.PI_SUBAGENT_MUX = "wezterm";
+      process.env.WEZTERM_PANE = "42";
+      assert.equal(getParentSurfaceId(), "42");
+    });
+
+    it("returns empty string when no parent surface is set", () => {
+      delete process.env.TMUX_PANE;
+      delete process.env.WEZTERM_PANE;
+      process.env.PI_SUBAGENT_MUX = "tmux";
+      assert.equal(getParentSurfaceId(), "");
+      _resetMuxForTesting();
+      process.env.PI_SUBAGENT_MUX = "wezterm";
+      assert.equal(getParentSurfaceId(), "");
+    });
+  });
+});
