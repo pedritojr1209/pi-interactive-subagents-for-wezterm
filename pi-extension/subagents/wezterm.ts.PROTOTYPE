@@ -1,0 +1,462 @@
+/**
+ * PROTOTYPE — wezterm surface layer for the pi-interactive-subagents dispatcher.
+ *
+ * Throwaway prototype for Wayfinder Ticket 2 (Issue #3). Mirrors the 9-name
+ * surface of `tmux.ts` (the baseline) using `wezterm cli` subcommands:
+ *
+ *   tmux split-window -h -d -t <pane>      → wezterm cli split-pane --right --pane-id <id>
+ *   tmux send-keys -t <pane> -l <cmd>      → wezterm cli send-text --pane-id <id> --no-paste "<cmd>\n"
+ *       Enter
+ *   tmux capture-pane -p -t <pane> -S -N   → wezterm cli get-text --pane-id <id> --start-line 0 --end-line N
+ *   tmux kill-pane -t <pane>               → wezterm cli kill-pane --pane-id <id>
+ *   tmux list-panes                        → wezterm cli list --format json
+ *
+ * ADR 0001 constraints honored:
+ *   - Auto-detect precedence is handled by the dispatcher (mux.ts). Here we
+ *     expose isWeztermAvailable() as the only per-mux availability probe.
+ *   - "Available" requires three checks: $WEZTERM_PANE set, wezterm binary on
+ *     PATH, and `wezterm cli list` liveness. All three run once per module
+ *     load and are memoized. Failure returns available: false with per-check
+ *     breakdown in _weztermAvailability() (analogous to __pollForExitTest__).
+ *   - Empty-string $WEZTERM_PANE → available: false (treated the same as
+ *     unset; avoids a WezTerm mux server talking to itself).
+ *   - Parent surface for splitPane defaults to $env:WEZTERM_PANE so the new
+ *     pane follows the pi process rather than the user's focus.
+ *
+ * Windows / pwsh notes:
+ *   - Argument arrays are used everywhere (no shell: true). On Windows this
+ *     sidesteps MSYS/Cygwin PATH-translation surprises for the wezterm.exe and
+ *     pwsh.exe binaries.
+ *   - sendLongCommand writes a `.ps1` and invokes it as one literal argv
+ *     token via pwsh -NoProfile -ExecutionPolicy Bypass -File. The pwsh
+ *     launcher details (env var prefix, $LASTEXITCODE sentinel, Set-Location
+ *     -LiteralPath) are governed by Ticket 4 / Ticket 7; this prototype uses
+ *     the placeholder shape those tickets settle on.
+ */
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
+import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+
+const execFileAsync = promisify(execFile);
+
+// ── Availability ──
+
+const commandAvailability = new Map<string, boolean>();
+
+function hasCommand(command: string): boolean {
+  if (commandAvailability.has(command)) {
+    return commandAvailability.get(command)!;
+  }
+
+  let available = false;
+  try {
+    execFileSync("sh", ["-c", `command -v ${command}`], { stdio: "ignore" });
+    available = true;
+  } catch {
+    available = false;
+  }
+
+  commandAvailability.set(command, available);
+  return available;
+}
+
+export interface WeztermAvailability {
+  available: boolean;
+  envVar: { set: boolean; value: string };
+  binary: { found: boolean; path?: string };
+  liveness: { ok: boolean; error?: string };
+}
+
+let weztermAvailabilityMemo: WeztermAvailability | null = null;
+
+/**
+ * Rich availability check: env-var set, binary on PATH, liveness probe.
+ * Memoized for the lifetime of the module (per ADR 0001 "once per module
+ * load"). Empty-string $WEZTERM_PANE counts as not-set — a WezTerm mux
+ * server inside a non-WezTerm shell would set it to "" and we don't want
+ * to mistake that for "we are inside WezTerm".
+ */
+export function _weztermAvailability(): WeztermAvailability {
+  if (weztermAvailabilityMemo) return weztermAvailabilityMemo;
+
+  const rawPane = process.env.WEZTERM_PANE ?? "";
+  const envSet = rawPane.length > 0;
+  const binaryFound = hasCommand("wezterm");
+
+  let livenessOk = false;
+  let livenessError: string | undefined;
+  if (binaryFound) {
+    try {
+      execFileSync("wezterm", ["cli", "list", "--format", "json"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      livenessOk = true;
+    } catch (err: any) {
+      livenessOk = false;
+      livenessError = err?.message ?? String(err);
+    }
+  }
+
+  const result: WeztermAvailability = {
+    available: envSet && binaryFound && livenessOk,
+    envVar: { set: envSet, value: rawPane },
+    binary: { found: binaryFound },
+    liveness: { ok: livenessOk, error: livenessError },
+  };
+  weztermAvailabilityMemo = result;
+  return result;
+}
+
+/**
+ * True when running inside WezTerm with wezterm.exe on PATH and the mux
+ * server responding. Mirrors isTmuxAvailable(): the dispatcher picks
+ * between isTmuxAvailable and isWeztermAvailable via $PI_SUBAGENT_MUX.
+ */
+export function isWeztermAvailable(): boolean {
+  return _weztermAvailability().available;
+}
+
+/**
+ * Standalone "is some mux available" — this prototype is the wezterm side
+ * of the seam, so it returns isWeztermAvailable(). The dispatcher's mux.ts
+ * barrel will swap this to the per-mux implementation at module load.
+ */
+export function isMuxAvailable(): boolean {
+  return isWeztermAvailable();
+}
+
+export function muxSetupHint(): string {
+  return (
+    "Start pi inside WezTerm on Windows (run `wezterm` then launch `pi` in its shell). " +
+    "WezTerm sets $env:WEZTERM_PANE for every pane it spawns."
+  );
+}
+
+function requireWezterm(): void {
+  if (!isWeztermAvailable()) {
+    const a = _weztermAvailability();
+    const reasons: string[] = [];
+    if (!a.envVar.set) reasons.push("$env:WEZTERM_PANE is empty");
+    if (!a.binary.found) reasons.push("wezterm.exe not found on PATH");
+    if (!a.liveness.ok) reasons.push(`wezterm cli list failed: ${a.liveness.error ?? "unknown"}`);
+    throw new Error(
+      `wezterm is required for subagents (${reasons.join("; ")}). ${muxSetupHint()}`,
+    );
+  }
+}
+
+// ── Shell helpers ──
+
+/**
+ * PowerShell single-quoted string escape (per ADR 0001 / pwsh-launcher-facts).
+ * Inside pwsh single quotes, ' is doubled to '' and backslash is literal.
+ * This is the sibling of tmux.ts:66 shellEscape, used only by the .ps1
+ * script body produced in sendLongCommand.
+ */
+export function shellEscape(s: string): string {
+  return "'" + s.replace(/'/g, "''") + "'";
+}
+
+// ── Parent surface ──
+
+/**
+ * The WezTerm pane the pi process lives in. Equivalent to tmux's $TMUX_PANE.
+ * ADR 0001 says: empty string means we're at the root — for WezTerm that
+ * means we are the only pane in the window, so any split will create the
+ * first split. We expose a getter rather than a constant so it can be
+ * overridden in the prototype harness if needed.
+ */
+export function parentPane(): string | undefined {
+  const v = process.env.WEZTERM_PANE;
+  return v && v.length > 0 ? v : undefined;
+}
+
+// ── Pane creation ──
+
+/**
+ * Map our 4-direction vocabulary onto wezterm's --left/--right/--top/--bottom.
+ * Tmux uses -h/-v/-b; wezterm uses --left/--right/--top/--bottom. There is
+ * no WezTerm CLI flag equivalent to tmux's -b (split-before), so "left"
+ * and "up" both produce a new pane positioned before the source — that's
+ * the closest semantic match in wezterm's flat flag space.
+ */
+function directionFlags(direction: "left" | "right" | "up" | "down"): string[] {
+  switch (direction) {
+    case "left":
+      return ["--left"];
+    case "right":
+      return ["--right"];
+    case "up":
+      return ["--top"];
+    case "down":
+      return ["--bottom"];
+  }
+}
+
+/**
+ * Create a new subagent pane as a right split off the parent pi pane.
+ * WezTerm panes are anonymous in the CLI (no per-pane title field), so the
+ * `name` parameter is cosmetic only and is ignored — matching tmux.ts:117
+ * where it is also unused. The pi process inside the pane sets its own
+ * title via OSC escape sequences.
+ */
+export function createSurface(name: string): string {
+  void name;
+  return createSurfaceSplit(name, "right", parentPane());
+}
+
+/**
+ * Create a new pane split in the given direction, optionally from a
+ * non-parent source pane. Returns the new pane id as a string (WezTerm
+ * pane ids are numeric, e.g. "3", but we keep the surface handle as a
+ * string everywhere — same as tmux's "%12" handles).
+ */
+export function createSurfaceSplit(
+  name: string,
+  direction: "left" | "right" | "up" | "down",
+  fromSurface?: string,
+): string {
+  void name;
+  requireWezterm();
+
+  const args: string[] = ["cli", "split-pane", ...directionFlags(direction)];
+  if (fromSurface) args.push("--pane-id", fromSurface);
+
+  const pane = execFileSync("wezterm", args, { encoding: "utf8" }).trim();
+  if (!/^\d+$/.test(pane)) {
+    throw new Error(`Unexpected wezterm split-pane output: ${pane}`);
+  }
+  return pane;
+}
+
+// ── Send ──
+
+/**
+ * Send a command string to a pane and execute it. wezterm cli send-text
+ * sends bytes literally (--no-paste disables bracketed-paste wrap), so
+ * special characters arrive unchanged — pwsh in the receiving pane parses
+ * them as if typed. A trailing \n is appended so the command submits; tmux
+ * needed two calls (`-l` then Enter), wezterm needs the newline inline.
+ */
+export function sendCommand(surface: string, command: string): void {
+  requireWezterm();
+  execFileSync(
+    "wezterm",
+    ["cli", "send-text", "--pane-id", surface, "--no-paste", command + "\n"],
+    { encoding: "utf8" },
+  );
+}
+
+/**
+ * Send a long command by writing it to a `.ps1` script first. Avoids the
+ * terminal-line-wrapping issues that break long commands sent character-
+ * by-character through the pane, matching tmux.ts:178-203's sendLongCommand.
+ *
+ * On Windows + WezTerm, the launcher is:
+ *     pwsh -NoProfile -ExecutionPolicy Bypass -File "<path>"
+ * which wezterm cli send-text delivers as a single literal argv token to
+ * the pane (no shell-escape needed on the invocation line — see pwsh-
+ * launcher-facts §2).
+ *
+ * Script body is escaped with pwsh single-quote doubling (shellEscape) so
+ * arbitrary paths/args coming from outside the script don't break parsing.
+ * The trailing `Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"` matches the
+ * bash echo '__SUBAGENT_DONE_'$?'__' sentinel used by tmux.ts:1274.
+ */
+export function sendLongCommand(
+  surface: string,
+  command: string,
+  options?: { scriptPath?: string; scriptPreamble?: string },
+): string {
+  const scriptPath =
+    options?.scriptPath ??
+    join(
+      tmpdir(),
+      "pi-subagent-scripts",
+      `cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.ps1`,
+    );
+  mkdirSync(dirname(scriptPath), { recursive: true });
+
+  const scriptParts: string[] = [];
+  if (options?.scriptPreamble) {
+    scriptParts.push(options.scriptPreamble.trimEnd());
+  }
+  scriptParts.push(command);
+  scriptParts.push('Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"');
+
+  writeFileSync(scriptPath, scriptParts.join("\n") + "\n", "utf8");
+
+  const invocation = `pwsh -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`;
+  sendCommand(surface, invocation);
+  return scriptPath;
+}
+
+// ── Read screen ──
+
+/**
+ * Read the screen contents of a pane (sync). wezterm cli get-text returns
+ * plain UTF-8 text, one terminal line per output line — parseable by the
+ * same __SUBAGENT_DONE_<n>__ regex the tmux path uses. Requires nightly
+ * ≥ 20230320-124340-559cb7b0 (verified for the prototype host's
+ * 20240203-110809-5046fc22).
+ */
+export function readScreen(surface: string, lines = 50): string {
+  requireWezterm();
+  return execFileSync(
+    "wezterm",
+    [
+      "cli",
+      "get-text",
+      "--pane-id",
+      surface,
+      "--start-line",
+      "0",
+      "--end-line",
+      String(Math.max(1, lines)),
+    ],
+    { encoding: "utf8" },
+  );
+}
+
+export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
+  requireWezterm();
+  const { stdout } = await execFileAsync(
+    "wezterm",
+    [
+      "cli",
+      "get-text",
+      "--pane-id",
+      surface,
+      "--start-line",
+      "0",
+      "--end-line",
+      String(Math.max(1, lines)),
+    ],
+    { encoding: "utf8" },
+  );
+  return stdout;
+}
+
+// ── Close ──
+
+/**
+ * Close a pane. wezterm cli kill-pane requires nightly
+ * ≥ 20230326-111934-3666303c. On Windows there is no equivalent to tmux's
+ * rebalanceSurfaces (wezterm has no preset layouts); consecutive splits
+ * stay evenly sized naturally because wezterm defaults each new split to
+ * 50% of the source pane's space.
+ */
+export function closeSurface(surface: string): void {
+  requireWezterm();
+  execFileSync("wezterm", ["cli", "kill-pane", "--pane-id", surface], {
+    encoding: "utf8",
+  });
+}
+
+// ── Exit polling ──
+
+export interface PollResult {
+  reason: "done" | "sentinel" | "error";
+  exitCode: number;
+  errorMessage?: string;
+}
+
+/**
+ * Interpret an `.exit` sidecar payload (written by the error path in
+ * subagent-done.ts). Identical to tmux.ts — the .exit sidecar is mux-
+ * independent (it's a regular file on disk), so only the slow-path screen
+ * read changes between mux implementations.
+ */
+function interpretExitSidecar(data: any): PollResult {
+  if (data?.type === "error") {
+    const errorMessage =
+      typeof data.errorMessage === "string" && data.errorMessage.trim() !== ""
+        ? data.errorMessage
+        : "Subagent exited with stopReason=error (no errorMessage in sidecar).";
+    return { reason: "error", exitCode: 1, errorMessage };
+  }
+  return { reason: "done", exitCode: 0 };
+}
+
+export const __pollForExitTest__ = { interpretExitSidecar };
+
+/**
+ * Poll until the subagent exits. Fast path is the .exit sidecar (mux-
+ * independent). Slow path reads the pane screen via wezterm cli get-text
+ * and looks for the __SUBAGENT_DONE_<n>__ sentinel — same regex as tmux.
+ */
+export async function pollForExit(
+  surface: string,
+  signal: AbortSignal,
+  options: {
+    interval: number;
+    sessionFile?: string;
+    sentinelFile?: string;
+    onTick?: (elapsed: number) => void;
+  },
+): Promise<PollResult> {
+  const start = Date.now();
+
+  for (;;) {
+    if (signal.aborted) {
+      throw new Error("Aborted while waiting for subagent to finish");
+    }
+
+    if (options.sessionFile) {
+      try {
+        const exitFile = `${options.sessionFile}.exit`;
+        if (existsSync(exitFile)) {
+          const data = JSON.parse(readFileSync(exitFile, "utf-8"));
+          rmSync(exitFile, { force: true });
+          return interpretExitSidecar(data);
+        }
+      } catch {}
+    }
+
+    if (options.sentinelFile) {
+      try {
+        if (existsSync(options.sentinelFile)) {
+          return { reason: "sentinel", exitCode: 0 };
+        }
+      } catch {}
+    }
+
+    try {
+      const screen = await readScreenAsync(surface, 5);
+      const match = screen.match(/__SUBAGENT_DONE_(\d+)__/);
+      if (match) {
+        return { reason: "sentinel", exitCode: parseInt(match[1], 10) };
+      }
+    } catch {
+      if (options.sessionFile) {
+        try {
+          const exitFile = `${options.sessionFile}.exit`;
+          if (existsSync(exitFile)) {
+            const data = JSON.parse(readFileSync(exitFile, "utf-8"));
+            rmSync(exitFile, { force: true });
+            return interpretExitSidecar(data);
+          }
+        } catch {}
+      }
+    }
+
+    const elapsed = Math.floor((Date.now() - start) / 1000);
+    options.onTick?.(elapsed);
+
+    await new Promise<void>((resolve, reject) => {
+      if (signal.aborted) return reject(new Error("Aborted"));
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, options.interval);
+      function onAbort() {
+        clearTimeout(timer);
+        reject(new Error("Aborted"));
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+}
