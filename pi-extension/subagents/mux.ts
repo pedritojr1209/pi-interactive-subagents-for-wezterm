@@ -34,9 +34,15 @@ export interface MuxAvailability {
   source: MuxSelectionSource;
   /** True when the active mux is the one whose availability probe passes. */
   available: boolean;
-  envVar: { weztermPane: string | undefined; tmux: string | undefined };
+  /** Echoes of the env-var probes (empty string when unset). */
+  envVar: { wezterm: string; tmux: string };
   /** Echoed back when the user actually set `PI_SUBAGENT_MUX`. */
   piSubagentMux?: string;
+}
+
+function readEnvVar(name: string): string {
+  const v = process.env[name];
+  return v && v.length > 0 ? v : "";
 }
 
 let resolved: { active: ActiveMux; source: MuxSelectionSource } | null = null;
@@ -87,17 +93,17 @@ export function _resetMuxForTesting(): void {
  * `_weztermAvailability()` in `wezterm.ts` for diagnostics + tests.
  */
 export function _muxAvailability(): MuxAvailability {
-  const { active, source } = getActiveMux();
+  const { active: mux, source } = getActiveMux();
   const piRaw = process.env.PI_SUBAGENT_MUX;
   const tmuxAvail = tmux.isMuxAvailable();
   const wezAvail = wezterm.isMuxAvailable();
   return {
-    active,
+    active: mux,
     source,
-    available: active === "wezterm" ? wezAvail : tmuxAvail,
+    available: mux === "wezterm" ? wezAvail : tmuxAvail,
     envVar: {
-      weztermPane: process.env.WEZTERM_PANE,
-      tmux: process.env.TMUX,
+      wezterm: readEnvVar("WEZTERM_PANE"),
+      tmux: readEnvVar("TMUX"),
     },
     ...(piRaw !== undefined ? { piSubagentMux: piRaw } : {}),
   };
@@ -126,12 +132,7 @@ export function muxSetupHint(): string {
  */
 export function getParentSurfaceId(): string {
   const { active } = getActiveMux();
-  if (active === "wezterm") {
-    const v = process.env.WEZTERM_PANE ?? "";
-    return v.length > 0 ? v : "";
-  }
-  const v = process.env.TMUX_PANE ?? "";
-  return v.length > 0 ? v : "";
+  return readEnvVar(active === "wezterm" ? "WEZTERM_PANE" : "TMUX_PANE");
 }
 
 function active(): typeof tmux {

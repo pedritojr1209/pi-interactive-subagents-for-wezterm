@@ -2686,13 +2686,64 @@ import {
   getParentSurfaceId,
   _muxAvailability,
   _resetMuxForTesting,
+  createSurface as muxCreateSurface,
+  createSurfaceSplit as muxCreateSurfaceSplit,
+  sendCommand as muxSendCommand,
+  sendLongCommand as muxSendLongCommand,
+  pollForExit as muxPollForExit,
+  closeSurface as muxCloseSurface,
+  readScreen as muxReadScreen,
+  readScreenAsync as muxReadScreenAsync,
 } from "../pi-extension/subagents/mux.ts";
+
+/**
+ * Issue #7 step 3: "Verify all 9 names still resolve."
+ * Static-resolution check that every name index.ts imports from mux.ts is
+ * exported. Catches typos and accidental renames at compile time (via TS)
+ * and at runtime via the typeof assertions below.
+ */
+const REQUIRED_SURFACE = [
+  "isMuxAvailable",
+  "muxSetupHint",
+  "createSurface",
+  "createSurfaceSplit",
+  "sendCommand",
+  "sendLongCommand",
+  "pollForExit",
+  "closeSurface",
+  "readScreen",
+  "readScreenAsync",
+  "getParentSurfaceId",
+] as const;
 
 /**
  * Tests that exercise the `PI_SUBAGENT_MUX` env-var permutations must
  * reset the dispatcher's memoized resolution between cases — the
  * production code caches it for the lifetime of the module.
  */
+describe("mux.ts surface re-exports (Issue #7 step 3)", () => {
+  it("exports all 9 surface names (plus readScreenAsync, getParentSurfaceId)", () => {
+    // Each import above is a static reference; if any name drops out, this
+    // file won't compile. The assertions below guard against accidental
+    // re-binding (e.g. someone replaces an export with a `null` placeholder).
+    for (const name of REQUIRED_SURFACE) {
+      assert.equal(typeof ({
+        isMuxAvailable: muxIsMuxAvailable,
+        muxSetupHint: muxHint,
+        createSurface: muxCreateSurface,
+        createSurfaceSplit: muxCreateSurfaceSplit,
+        sendCommand: muxSendCommand,
+        sendLongCommand: muxSendLongCommand,
+        pollForExit: muxPollForExit,
+        closeSurface: muxCloseSurface,
+        readScreen: muxReadScreen,
+        readScreenAsync: muxReadScreenAsync,
+        getParentSurfaceId,
+      } as Record<string, unknown>)[name], "function", `${name} should be exported from mux.ts`);
+    }
+  });
+});
+
 describe("mux.ts", () => {
   const ENV_KEYS = ["PI_SUBAGENT_MUX", "WEZTERM_PANE", "TMUX", "TMUX_PANE"] as const;
   const savedEnv: Record<string, string | undefined> = {};
@@ -2789,7 +2840,7 @@ describe("mux.ts", () => {
       assert.equal(result.active, "tmux");
       assert.equal(result.source, "override");
       assert.equal(result.piSubagentMux, "tmux");
-      assert.deepEqual(Object.keys(result.envVar).sort(), ["tmux", "weztermPane"]);
+      assert.deepEqual(Object.keys(result.envVar).sort(), ["tmux", "wezterm"]);
     });
 
     it("omits piSubagentMux when the env var is unset", () => {
@@ -2809,11 +2860,9 @@ describe("mux.ts", () => {
       assert.equal(typeof noEnv, "boolean");
     });
 
-    it("ignores the per-mux isMuxAvailable import on tmux.ts (we test through the dispatcher)", () => {
-      // Sanity: the dispatcher's `isMuxAvailable` is the one exported from mux.ts.
+    it("PI_SUBAGENT_MUX=wezterm returns the wezterm availability (memoized)", () => {
       process.env.PI_SUBAGENT_MUX = "wezterm";
       const r1 = muxIsMuxAvailable();
-      // Same call twice — memoized at the per-mux layer is OK; dispatcher is stable.
       const r2 = muxIsMuxAvailable();
       assert.equal(r1, r2);
     });

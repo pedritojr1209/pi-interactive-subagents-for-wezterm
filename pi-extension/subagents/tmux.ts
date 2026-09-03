@@ -15,29 +15,11 @@ import { promisify } from "node:util";
 import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { hasCommand } from "./command-available.ts";
 
 const execFileAsync = promisify(execFile);
 
 // ── Availability ──
-
-const commandAvailability = new Map<string, boolean>();
-
-function hasCommand(command: string): boolean {
-  if (commandAvailability.has(command)) {
-    return commandAvailability.get(command)!;
-  }
-
-  let available = false;
-  try {
-    execFileSync("sh", ["-c", `command -v ${command}`], { stdio: "ignore" });
-    available = true;
-  } catch {
-    available = false;
-  }
-
-  commandAvailability.set(command, available);
-  return available;
-}
 
 /**
  * True when running inside tmux with the tmux binary on PATH.
