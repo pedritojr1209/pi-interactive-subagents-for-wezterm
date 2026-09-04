@@ -2684,43 +2684,47 @@ describe("tmux.ts", () => {
 
 describe("wezterm.ts:sendLongCommand (pwsh launcher)", () => {
   const {
-    pwshQuotePath,
+    shellEscape: pwshShellEscape,
     buildPwshInvocation,
     buildScriptBody,
     coercePwshScriptPath,
   } = weztermSendLongCommandTest;
 
-  describe("pwshQuotePath", () => {
-    it("wraps a plain Windows path in single quotes", () => {
-      assert.equal(pwshQuotePath("C:\\Users\\foo\\bar.ps1"), "'C:\\Users\\foo\\bar.ps1'");
-    });
-    it("doubles embedded apostrophes", () => {
-      assert.equal(pwshQuotePath("C:\\it's.ps1"), "'C:\\it''s.ps1'");
-    });
-    it("preserves $ and backtick literally (single quotes are literal in pwsh)", () => {
-      assert.equal(pwshQuotePath("$env:VAR\\foo.ps1"), "'$env:VAR\\foo.ps1'");
-      assert.equal(pwshQuotePath("a`b.ps1"), "'a`b.ps1'");
-    });
-    it("preserves POSIX paths verbatim", () => {
-      assert.equal(pwshQuotePath("/tmp/agent.ps1"), "'/tmp/agent.ps1'");
-    });
-    it("handles empty string", () => {
-      assert.equal(pwshQuotePath(""), "''");
+  describe("shellEscape (pwsh)", () => {
+    it("doubles single quotes and wraps", () => {
+      assert.equal(pwshShellEscape("hello"), "'hello'");
+      assert.equal(pwshShellEscape("it's"), "'it''s'");
+      assert.equal(pwshShellEscape(""), "''");
     });
   });
 
   describe("buildPwshInvocation", () => {
-    it("emits the canonical 4-token launcher", () => {
+    it("emits the canonical 4-token launcher for a POSIX path", () => {
       assert.equal(
         buildPwshInvocation("/tmp/agent.ps1"),
         "pwsh -NoProfile -ExecutionPolicy Bypass -File '/tmp/agent.ps1'",
       );
     });
-    it("quotes paths with spaces", () => {
-      const out = buildPwshInvocation("C:\\Program Files\\Pi\\agent.ps1");
+    it("quotes a Windows path with spaces via shellEscape", () => {
       assert.equal(
-        out,
+        buildPwshInvocation("C:\\Program Files\\Pi\\agent.ps1"),
         "pwsh -NoProfile -ExecutionPolicy Bypass -File 'C:\\Program Files\\Pi\\agent.ps1'",
+      );
+    });
+    it("doubles apostrophes in the path (shellEscape)", () => {
+      assert.equal(
+        buildPwshInvocation("C:\\it's.ps1"),
+        "pwsh -NoProfile -ExecutionPolicy Bypass -File 'C:\\it''s.ps1'",
+      );
+    });
+    it("preserves $ and backtick literally (single quotes are literal in pwsh)", () => {
+      assert.equal(
+        buildPwshInvocation("$env:VAR\\foo.ps1"),
+        "pwsh -NoProfile -ExecutionPolicy Bypass -File '$env:VAR\\foo.ps1'",
+      );
+      assert.equal(
+        buildPwshInvocation("a`b.ps1"),
+        "pwsh -NoProfile -ExecutionPolicy Bypass -File 'a`b.ps1'",
       );
     });
   });

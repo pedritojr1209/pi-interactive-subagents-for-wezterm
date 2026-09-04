@@ -139,9 +139,10 @@ function requireWezterm(): void {
 /**
  * PowerShell single-quoted string escape. Inside pwsh single quotes, `'` is
  * doubled to `''` and backslash is literal. This is the sibling of
- * `tmux.ts:shellEscape`, used only by the `.ps1` script body produced in
- * `sendLongCommand`. Exported so callers that build per-mux command parts
- * (e.g. the dispatcher tests) can use the same escape rules.
+ * `tmux.ts:shellEscape`, used by both the script body produced in
+ * `sendLongCommand` and the invocation string (`pwsh -File '<path>'`).
+ * Exported so callers that build per-mux command parts (e.g. the dispatcher
+ * tests) can use the same escape rules.
  */
 export function shellEscape(s: string): string {
   return "'" + s.replace(/'/g, "''") + "'";
@@ -283,18 +284,17 @@ export function sendLongCommand(
 
   writeFileSync(scriptPath, scriptParts.join("\n") + "\n", "utf8");
 
-  const invocation = `pwsh -NoProfile -ExecutionPolicy Bypass -File ${pwshQuotePath(scriptPath)}`;
-  sendCommand(surface, invocation);
+  sendCommand(surface, buildPwshInvocation(scriptPath));
   return scriptPath;
 }
 
 /**
- * pwsh single-quote-wraps a script path so `$`, backtick, `\`, and embedded
- * apostrophes survive pwsh argument parsing. Single quotes in pwsh are
- * literal except that `''` represents one `'`.
+ * Build the pwsh long-command invocation string. Single source of truth for
+ * the launcher shape — `sendLongCommand` calls it, and the test seam exposes
+ * it so unit tests can assert the exact bytes the pane will receive.
  */
-function pwshQuotePath(scriptPath: string): string {
-  return "'" + scriptPath.replace(/'/g, "''") + "'";
+function buildPwshInvocation(scriptPath: string): string {
+  return `pwsh -NoProfile -ExecutionPolicy Bypass -File ${shellEscape(scriptPath)}`;
 }
 
 /**
@@ -327,10 +327,8 @@ export function coercePwshScriptPath(scriptPath: string): string {
  * is unaffected.
  */
 export const __sendLongCommandTest__ = {
-  pwshQuotePath,
-  buildPwshInvocation(scriptPath: string): string {
-    return `pwsh -NoProfile -ExecutionPolicy Bypass -File ${pwshQuotePath(scriptPath)}`;
-  },
+  shellEscape,
+  buildPwshInvocation,
   buildScriptBody(parts: readonly string[]): string {
     return parts.join("\n") + "\n";
   },
