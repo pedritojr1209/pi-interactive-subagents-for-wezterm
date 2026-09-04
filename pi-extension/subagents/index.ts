@@ -1119,6 +1119,36 @@ function resolveResumeLaunchBehavior(): { autoExit: boolean; interactive: boolea
   return { autoExit: true, interactive: false };
 }
 
+/**
+ * Three-tier model resolution:
+ *   1. explicit params.model (caller override)
+ *   2. agent frontmatter model (agent definition)
+ *   3. parent pi's active model from ctx.model (inherited)
+ * Returns undefined when none resolve, which signals "let pi pick its default".
+ *
+ * ctx.model may be a fully-resolved Model<any> ({provider,id,…}) or, in some
+ * surface shapes, a pre-formatted "provider/id" string. Treat both shapes, and
+ * tolerate a missing provider so we never emit "undefined/<id>".
+ */
+function resolveEffectiveModel(
+  params: { model?: string },
+  agentDefs: { model?: string } | null | undefined,
+  ctx: { model?: unknown } | null | undefined,
+): string | undefined {
+  let inherited: string | undefined;
+  if (typeof ctx?.model === "string") {
+    inherited = ctx.model;
+  } else if (ctx?.model && typeof ctx.model === "object") {
+    const m = ctx.model as { provider?: unknown; id?: unknown };
+    if (typeof m.id === "string" && m.id) {
+      inherited = typeof m.provider === "string" && m.provider
+        ? `${m.provider}/${m.id}`
+        : m.id;
+    }
+  }
+  return params.model ?? agentDefs?.model ?? inherited;
+}
+
 export const __test__ = {
   borderLine,
   getShellReadyDelayMs,
@@ -1128,6 +1158,7 @@ export const __test__ = {
   resolveEffectiveSessionMode,
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
+  resolveEffectiveModel,
   buildSubagentToolAllowlist,
   applySandboxToParts,
   buildPiPromptArgs,
@@ -1167,14 +1198,14 @@ function startWidgetRefresh() {
  */
 async function launchSubagent(
   params: typeof SubagentParams.static,
-  ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string },
+  ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string; model?: unknown },
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
   const id = Math.random().toString(16).slice(2, 10);
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
-  const effectiveModel = params.model ?? agentDefs?.model;
+  const effectiveModel = resolveEffectiveModel(params, agentDefs, ctx);
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
   const effectiveThinking = agentDefs?.thinking;

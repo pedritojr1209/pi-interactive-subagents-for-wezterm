@@ -364,6 +364,140 @@ describe("session.ts", () => {
     });
   });
 
+  describe("resolveEffectiveModel (Issue #9 / Ticket 8)", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const resolve = testApi.resolveEffectiveModel;
+
+    it("returns params.model when the caller provides one", () => {
+      assert.equal(
+        resolve({ model: "openai/gpt-4o" }, { model: "anthropic/claude-sonnet" }, { model: { provider: "openrouter", id: "z-ai/glm-5.2" } }),
+        "openai/gpt-4o",
+      );
+    });
+
+    it("returns agent frontmatter model when params.model is omitted", () => {
+      assert.equal(
+        resolve({}, { model: "anthropic/claude-sonnet" }, { model: { provider: "openrouter", id: "z-ai/glm-5.2" } }),
+        "anthropic/claude-sonnet",
+      );
+    });
+
+    it("inherits parent ctx.model as provider/id when params and frontmatter are unset", () => {
+      assert.equal(
+        resolve({}, null, { model: { provider: "openrouter", id: "z-ai/glm-5.2" } }),
+        "openrouter/z-ai/glm-5.2",
+      );
+    });
+
+    it("inherits parent ctx.model when agentDefs is null and params.model is omitted", () => {
+      assert.equal(
+        resolve({}, null, { model: { provider: "openai", id: "gpt-4o" } }),
+        "openai/gpt-4o",
+      );
+    });
+
+    it("returns undefined when no source resolves (parent ctx.model undefined)", () => {
+      assert.equal(resolve({}, null, { model: undefined }), undefined);
+    });
+
+    it("returns undefined when ctx is null/undefined and no other source is set", () => {
+      assert.equal(resolve({}, null, null), undefined);
+      assert.equal(resolve({}, null, undefined), undefined);
+    });
+
+    it("falls back to bare id when parent model has no provider", () => {
+      assert.equal(
+        resolve({}, null, { model: { id: "gpt-4o" } }),
+        "gpt-4o",
+      );
+    });
+
+    it("accepts a pre-formatted string ctx.model", () => {
+      assert.equal(
+        resolve({}, null, { model: "openai/gpt-4o" }),
+        "openai/gpt-4o",
+      );
+    });
+
+    it("does not produce 'undefined/<id>' for malformed ctx.model", () => {
+      const result = resolve({}, null, { model: { provider: undefined, id: "gpt-4o" } });
+      assert.equal(result, "gpt-4o");
+    });
+
+    it("snapshots the inherited model into the loadout (null when no source resolves)", () => {
+      const inherited = resolve({}, null, { model: { provider: "openrouter", id: "z-ai/glm-5.2" } });
+      const sf = join(dir, "s-inherit.jsonl");
+      const loadout: SubagentLoadout = {
+        agent: null,
+        toolAllowlist: null,
+        model: inherited ?? null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: false,
+        cwd: null,
+        agentDir: null,
+      };
+      writeSubagentLoadout(sf, loadout);
+      const read = readSubagentLoadout(sf);
+      assert.equal(read?.model, "openrouter/z-ai/glm-5.2");
+
+      const sf2 = join(dir, "s-default.jsonl");
+      const defaultLoadout: SubagentLoadout = { ...loadout, model: resolve({}, null, { model: undefined }) ?? null };
+      writeSubagentLoadout(sf2, defaultLoadout);
+      assert.equal(readSubagentLoadout(sf2)?.model, null);
+    });
+
+    it("resume path: inherited model is replayed into argv via applySandboxToParts", () => {
+      // Resume invariant: a resumed subagent reuses the model its previous
+      // incarnation was running on, even if the parent has since switched
+      // (loadout snapshot is replayed verbatim — applySandboxToParts is the
+      // single source of truth for both launch and resume).
+      const testApi = (subagentsModule as any).__test__;
+      const inherited = resolve({}, null, { model: { provider: "openrouter", id: "z-ai/glm-5.2" } });
+      const loadout: SubagentLoadout = {
+        agent: null,
+        toolAllowlist: null,
+        model: inherited ?? null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: false,
+        cwd: null,
+        agentDir: null,
+      };
+      const parts: string[] = ["pi", "--session", "/tmp/resume.jsonl"];
+      testApi.applySandboxToParts(parts, loadout, { artifactDir: dir, name: "resumed" });
+      const modelIdx = parts.indexOf("--model");
+      assert.ok(modelIdx >= 0, "expected --model to be emitted on resume");
+      // applySandboxToParts runs the model through shellEscape (POSIX
+      // single-quote wrap) so the resulting argv token is safe to splice
+      // into a tmux send-keys command.
+      assert.equal(parts[modelIdx + 1], "'openrouter/z-ai/glm-5.2'");
+    });
+
+    it("resume path: omitted model is not emitted (lets pi pick its default)", () => {
+      const testApi = (subagentsModule as any).__test__;
+      const loadout: SubagentLoadout = {
+        agent: null,
+        toolAllowlist: null,
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: false,
+        cwd: null,
+        agentDir: null,
+      };
+      const parts: string[] = ["pi", "--session", "/tmp/resume.jsonl"];
+      testApi.applySandboxToParts(parts, loadout, { artifactDir: dir, name: "defaulted" });
+      assert.equal(parts.includes("--model"), false, "expected --model to be omitted when loadout.model is null");
+    });
+  });
+
   describe("subagent name registry", () => {
     it("registers and resolves a name to its session file", () => {
       const adir = join(dir, "art-1");
