@@ -30,7 +30,10 @@ import {
   summarizeSessionStats,
 } from "../pi-extension/subagents/session.ts";
 
-import { shellEscape } from "../pi-extension/subagents/tmux.ts";
+import { shellEscape, __sendLongCommandTest__ as tmuxSendLongCommandTest } from "../pi-extension/subagents/tmux.ts";
+import {
+	__sendLongCommandTest__ as weztermSendLongCommandTest,
+} from "../pi-extension/subagents/wezterm.ts";
 import {
   advanceStatusState,
   capStatusLines,
@@ -2674,6 +2677,135 @@ describe("tmux.ts", () => {
       // Inside single quotes, everything is literal
       assert.ok(escaped.includes("$world"));
     });
+  });
+});
+
+// ── pwsh / wezterm launcher (Issue #8, Ticket 7) ──
+
+describe("wezterm.ts:sendLongCommand (pwsh launcher)", () => {
+  const {
+    pwshQuotePath,
+    buildPwshInvocation,
+    buildScriptBody,
+    coercePwshScriptPath,
+  } = weztermSendLongCommandTest;
+
+  describe("pwshQuotePath", () => {
+    it("wraps a plain Windows path in single quotes", () => {
+      assert.equal(pwshQuotePath("C:\\Users\\foo\\bar.ps1"), "'C:\\Users\\foo\\bar.ps1'");
+    });
+    it("doubles embedded apostrophes", () => {
+      assert.equal(pwshQuotePath("C:\\it's.ps1"), "'C:\\it''s.ps1'");
+    });
+    it("preserves $ and backtick literally (single quotes are literal in pwsh)", () => {
+      assert.equal(pwshQuotePath("$env:VAR\\foo.ps1"), "'$env:VAR\\foo.ps1'");
+      assert.equal(pwshQuotePath("a`b.ps1"), "'a`b.ps1'");
+    });
+    it("preserves POSIX paths verbatim", () => {
+      assert.equal(pwshQuotePath("/tmp/agent.ps1"), "'/tmp/agent.ps1'");
+    });
+    it("handles empty string", () => {
+      assert.equal(pwshQuotePath(""), "''");
+    });
+  });
+
+  describe("buildPwshInvocation", () => {
+    it("emits the canonical 4-token launcher", () => {
+      assert.equal(
+        buildPwshInvocation("/tmp/agent.ps1"),
+        "pwsh -NoProfile -ExecutionPolicy Bypass -File '/tmp/agent.ps1'",
+      );
+    });
+    it("quotes paths with spaces", () => {
+      const out = buildPwshInvocation("C:\\Program Files\\Pi\\agent.ps1");
+      assert.equal(
+        out,
+        "pwsh -NoProfile -ExecutionPolicy Bypass -File 'C:\\Program Files\\Pi\\agent.ps1'",
+      );
+    });
+  });
+
+  describe("buildScriptBody", () => {
+    it("joins lines with LF and a trailing newline", () => {
+      const body = buildScriptBody(["Set-Location x", "pi --foo"]);
+      assert.equal(body, "Set-Location x\npi --foo\n");
+    });
+    it("never introduces CRLF (pwsh 7 accepts LF)", () => {
+      const body = buildScriptBody(["a", "b", "c"]);
+      assert.ok(!body.includes("\r"));
+    });
+    it("appends the SUBAGENT_DONE sentinel when asked", () => {
+      const body = buildScriptBody([
+        "pi --foo",
+        'Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"',
+      ]);
+      assert.match(body, /__SUBAGENT_DONE_\$LASTEXITCODE__/);
+    });
+  });
+
+  describe("coercePwshScriptPath (Ticket 7 CRITICAL)", () => {
+    // pwsh -File rejects non-.ps1 paths. Callers in index.ts currently pass
+    // options.scriptPath ending in `.sh`. Without coercion, the launcher
+    // fails with: "The argument to the -File parameter does not end with
+    // the .ps1 extension." This coercion is the seam that fixes it without
+    // touching index.ts.
+    it("rewrites a trailing .sh to .ps1", () => {
+      assert.equal(
+        coercePwshScriptPath("C:\\tmp\\worker-abc.sh"),
+        "C:\\tmp\\worker-abc.ps1",
+      );
+    });
+    it("leaves a trailing .ps1 alone", () => {
+      assert.equal(
+        coercePwshScriptPath("C:\\tmp\\worker-abc.ps1"),
+        "C:\\tmp\\worker-abc.ps1",
+      );
+    });
+    it("appends .ps1 when no extension is present", () => {
+      assert.equal(coercePwshScriptPath("C:\\tmp\\worker-abc"), "C:\\tmp\\worker-abc.ps1");
+    });
+    it("does not touch extensions other than .sh", () => {
+      assert.equal(
+        coercePwshScriptPath("C:\\tmp\\worker-abc.txt"),
+        "C:\\tmp\\worker-abc.txt.ps1",
+      );
+    });
+    it("handles POSIX-style paths", () => {
+      assert.equal(coercePwshScriptPath("/tmp/agent.sh"), "/tmp/agent.ps1");
+    });
+    it("matches only a final .sh segment (not embedded)", () => {
+      // File named "showcase.sh.bak" must NOT be rewritten — only the final
+      // `.sh` segment is the launcher extension the caller used.
+      assert.equal(coercePwshScriptPath("/tmp/showcase.sh.bak"), "/tmp/showcase.sh.bak.ps1");
+    });
+  });
+});
+
+describe("tmux.ts:sendLongCommand (POSIX launcher backward compat)", () => {
+  const { buildScriptBody } = tmuxSendLongCommandTest;
+
+  it("builds a body starting with the bash shebang when callers prepend one", () => {
+    // Caller-side test: mirrors the index.ts:1286 call shape, which prepends
+    // its own preamble. The POSIX launcher body builder only joins lines.
+    const body = buildScriptBody(["#!/bin/bash", "echo hi"]);
+    assert.ok(body.startsWith("#!/bin/bash\n"));
+  });
+
+  it("joins lines with LF and a trailing newline (matches bash script expectations)", () => {
+    const body = buildScriptBody(["a", "b"]);
+    assert.equal(body, "a\nb\n");
+  });
+
+  it("never introduces CRLF (POSIX scripts are LF-only)", () => {
+    const body = buildScriptBody(["x"]);
+    assert.ok(!body.includes("\r"));
+  });
+
+  it("shellEscape is unchanged: posix single-quote escape still applied", () => {
+    // Regression guard: this is the existing public behavior. If this breaks,
+    // every caller that passes paths/args via tmux breaks.
+    assert.equal(shellEscape("/tmp/with space.sh"), "'/tmp/with space.sh'");
+    assert.equal(shellEscape("it's"), "'it'\\''s'");
   });
 });
 

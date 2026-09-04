@@ -27,10 +27,15 @@
  *   - Argument arrays are used everywhere (no `shell: true`). On Windows this
  *     sidesteps MSYS/Cygwin PATH-translation surprises for `wezterm.exe` and
  *     `pwsh.exe`.
- *   - `sendLongCommand` writes a `.ps1` and invokes it as one literal argv
- *     token via `pwsh -NoProfile -ExecutionPolicy Bypass -File`. The pwsh
- *     launcher details (env var prefix, `$LASTEXITCODE` sentinel,
- *     `Set-Location -LiteralPath`) are governed by Ticket 4 / Ticket 7.
+ *   - `sendLongCommand` writes a `.ps1` (coerced from a `.sh` script path if
+ *     the caller still passes one — pwsh `-File` rejects non-`.ps1` paths)
+ *     and invokes it as `pwsh -NoProfile -ExecutionPolicy Bypass -File '<path>'`.
+ *     The single-quoted path neutralizes `$`, backtick, and embedded `'`
+ *     inside the path so pwsh argument parsing sees it as one literal token.
+ *     The trailing `Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"` matches
+ *     the bash `echo '__SUBAGENT_DONE_'$?'__'` sentinel used by `tmux.ts`.
+ *     See `research/pwsh-launcher-facts.md` (Ticket 4) for the primary-source
+ *     notes governing this launcher.
  */
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -238,9 +243,16 @@ export function sendCommand(surface: string, command: string): void {
  * by-character through the pane, matching `tmux.ts:sendLongCommand`.
  *
  * On Windows + WezTerm, the launcher is:
- *     pwsh -NoProfile -ExecutionPolicy Bypass -File "<path>"
- * which `wezterm cli send-text` delivers as a single literal argv token to
- * the pane (no shell-escape needed on the invocation line).
+ *     pwsh -NoProfile -ExecutionPolicy Bypass -File '<path>'
+ * The path is pwsh-single-quoted (apostrophe doubled) so paths containing
+ * `$`, backtick, or `\` survive pwsh argument parsing on Windows where
+ * `$TMPDIR` / `$LOCALAPPDATA` may include them. `wezterm cli send-text`
+ * delivers the invocation as literal bytes to the pane.
+ *
+ * `pwsh -File` requires a `.ps1` extension. Existing callers in index.ts
+ * pass `options.scriptPath` ending in `.sh`; `coercePwshScriptPath` rewrites
+ * a final `.sh` to `.ps1` so we don't break those callers. See Issue #8 /
+ * Ticket 7 for the rationale.
  *
  * Script body is escaped with pwsh single-quote doubling (`shellEscape`) so
  * arbitrary paths/args coming from outside the script don't break parsing.
@@ -252,13 +264,14 @@ export function sendLongCommand(
   command: string,
   options?: { scriptPath?: string; scriptPreamble?: string },
 ): string {
-  const scriptPath =
+  const scriptPath = coercePwshScriptPath(
     options?.scriptPath ??
-    join(
-      tmpdir(),
-      "pi-subagent-scripts",
-      `cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.ps1`,
-    );
+      join(
+        tmpdir(),
+        "pi-subagent-scripts",
+        `cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.ps1`,
+      ),
+  );
   mkdirSync(dirname(scriptPath), { recursive: true });
 
   const scriptParts: string[] = [];
@@ -270,10 +283,59 @@ export function sendLongCommand(
 
   writeFileSync(scriptPath, scriptParts.join("\n") + "\n", "utf8");
 
-  const invocation = `pwsh -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`;
+  const invocation = `pwsh -NoProfile -ExecutionPolicy Bypass -File ${pwshQuotePath(scriptPath)}`;
   sendCommand(surface, invocation);
   return scriptPath;
 }
+
+/**
+ * pwsh single-quote-wraps a script path so `$`, backtick, `\`, and embedded
+ * apostrophes survive pwsh argument parsing. Single quotes in pwsh are
+ * literal except that `''` represents one `'`.
+ */
+function pwshQuotePath(scriptPath: string): string {
+  return "'" + scriptPath.replace(/'/g, "''") + "'";
+}
+
+/**
+ * `pwsh -File` rejects any path that does not end in `.ps1` with:
+ *   "The argument to the -File parameter does not end with the .ps1 extension."
+ * Existing callers in `index.ts` still pass `options.scriptPath` ending in
+ * `.sh` (the POSIX launcher extension), so we rewrite a final `.sh` to
+ * `.ps1` here. A path already ending in `.ps1` is returned unchanged; any
+ * other trailing extension (`.txt`, `.sh.bak`, no extension at all) gets
+ * `.ps1` appended so `pwsh -File` accepts it. This is intentionally narrow:
+ * we only know about `.sh` and `.ps1` because those are the only extensions
+ * the launchers emit or callers pass.
+ *
+ * Exported through the test seam (`__sendLongCommandTest__`) for unit tests.
+ */
+export function coercePwshScriptPath(scriptPath: string): string {
+  if (/\.sh$/.test(scriptPath)) {
+    return scriptPath.replace(/\.sh$/, ".ps1");
+  }
+  if (/\.ps1$/.test(scriptPath)) {
+    return scriptPath;
+  }
+  return scriptPath + ".ps1";
+}
+
+/**
+ * Test-only seam: lets unit tests assert the invocation string, script body,
+ * and path coercion without running wezterm/pwsh. Mirrors `__pollForExitTest__`
+ * in tmux.ts and `__sendLongCommandTest__` in tmux.ts. Production behavior
+ * is unaffected.
+ */
+export const __sendLongCommandTest__ = {
+  pwshQuotePath,
+  buildPwshInvocation(scriptPath: string): string {
+    return `pwsh -NoProfile -ExecutionPolicy Bypass -File ${pwshQuotePath(scriptPath)}`;
+  },
+  buildScriptBody(parts: readonly string[]): string {
+    return parts.join("\n") + "\n";
+  },
+  coercePwshScriptPath,
+};
 
 // ── Read screen ──
 

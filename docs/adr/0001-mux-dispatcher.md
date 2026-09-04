@@ -40,3 +40,9 @@ Considered alternatives:
 
 This is locked by [#2](../../issues/2); see its resolution comment for
 the full decision set and cascade into Tickets 3, 6, and 10.
+
+## See also
+
+- `research/pwsh-launcher-facts.md` — primary-source notes for the pwsh
+  long-command launcher used by the WezTerm path (`wezterm.ts:sendLongCommand`).
+  Established by Ticket 4 (Issue #4) and landed in Ticket 7 (Issue #8).

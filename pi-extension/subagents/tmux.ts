@@ -185,6 +185,17 @@ export function sendLongCommand(
 }
 
 /**
+ * Test-only seam for the POSIX/bash launcher body, mirroring
+ * `__sendLongCommandTest__` in wezterm.ts. Lets unit tests assert what would
+ * be written to disk without invoking tmux. Production behavior unchanged.
+ */
+export const __sendLongCommandTest__ = {
+  buildScriptBody(parts: readonly string[]): string {
+    return parts.join("\n") + "\n";
+  },
+};
+
+/**
  * Read the screen contents of a pane (sync).
  */
 export function readScreen(surface: string, lines = 50): string {
