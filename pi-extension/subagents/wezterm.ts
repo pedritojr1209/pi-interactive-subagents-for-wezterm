@@ -57,6 +57,10 @@ export interface WeztermAvailability {
 
 let weztermAvailabilityMemo: WeztermAvailability | null = null;
 
+export function _resetAvailabilityForTesting(): void {
+  weztermAvailabilityMemo = null;
+}
+
 /**
  * Rich availability check: env-var set, binary on PATH, liveness probe.
  * Memoized for the lifetime of the module (per ADR 0001 "once per module
@@ -333,6 +337,7 @@ export const __sendLongCommandTest__ = {
     return parts.join("\n") + "\n";
   },
   coercePwshScriptPath,
+  directionFlags,
 };
 
 // ── Read screen ──

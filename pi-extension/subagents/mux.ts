@@ -139,6 +139,15 @@ function active(): typeof tmux {
   return getActiveMux().active === "wezterm" ? (wezterm as unknown as typeof tmux) : tmux;
 }
 
+/**
+ * Re-export shellEscape from the active mux module. Both tmux and wezterm export
+ * `shellEscape` with the same signature, so callers (e.g. the test harness) can
+ * import from mux.ts without knowing which mux is active.
+ */
+export function shellEscape(s: string): string {
+  return active().shellEscape(s);
+}
+
 export function createSurface(name: string): string {
   return active().createSurface(name);
 }

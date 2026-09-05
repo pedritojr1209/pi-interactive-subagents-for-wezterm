@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach } from "node:test";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -2964,7 +2964,14 @@ import {
   closeSurface as muxCloseSurface,
   readScreen as muxReadScreen,
   readScreenAsync as muxReadScreenAsync,
+  shellEscape as muxShellEscape,
 } from "../pi-extension/subagents/mux.ts";
+
+import {
+  _weztermAvailability,
+  _resetAvailabilityForTesting as _resetWeztermAvailabilityForTesting,
+  parentPane,
+} from "../pi-extension/subagents/wezterm.ts";
 
 /**
  * Issue #7 step 3: "Verify all 9 names still resolve."
@@ -3173,6 +3180,117 @@ describe("mux.ts", () => {
       _resetMuxForTesting();
       process.env.PI_SUBAGENT_MUX = "wezterm";
       assert.equal(getParentSurfaceId(), "");
+    });
+  });
+});
+
+// ── wezterm.ts unit tests (Issue #10, Tier 1) ──
+
+describe("wezterm.ts", () => {
+  const WEZENV_KEYS = ["WEZTERM_PANE", "PI_SUBAGENT_MUX", "TMUX", "TMUX_PANE"] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  before(() => {
+    for (const k of WEZENV_KEYS) savedEnv[k] = process.env[k];
+  });
+  after(() => {
+    for (const k of WEZENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  describe("directionFlags (via __sendLongCommandTest__)", () => {
+    const { directionFlags } = weztermSendLongCommandTest;
+
+    it("maps right to --right", () => {
+      assert.deepEqual(directionFlags("right"), ["--right"]);
+    });
+
+    it("maps left to --left", () => {
+      assert.deepEqual(directionFlags("left"), ["--left"]);
+    });
+
+    it("maps up to --top", () => {
+      assert.deepEqual(directionFlags("up"), ["--top"]);
+    });
+
+    it("maps down to --bottom", () => {
+      assert.deepEqual(directionFlags("down"), ["--bottom"]);
+    });
+  });
+
+  describe("parentPane", () => {
+    beforeEach(() => {
+      _resetWeztermAvailabilityForTesting();
+    });
+
+    it("returns the WEZTERM_PANE value when set and non-empty", () => {
+      process.env.WEZTERM_PANE = "7";
+      assert.equal(parentPane(), "7");
+    });
+
+    it("returns undefined when WEZTERM_PANE is empty string", () => {
+      process.env.WEZTERM_PANE = "";
+      assert.equal(parentPane(), undefined);
+    });
+
+    it("returns undefined when WEZTERM_PANE is unset", () => {
+      delete process.env.WEZTERM_PANE;
+      assert.equal(parentPane(), undefined);
+    });
+  });
+
+  describe("_weztermAvailability", () => {
+    const ENV_KEYS = ["WEZTERM_PANE", "PI_SUBAGENT_MUX"] as const;
+
+    beforeEach(() => {
+      _resetWeztermAvailabilityForTesting();
+      for (const k of ENV_KEYS) delete process.env[k];
+    });
+
+    afterEach(() => {
+      _resetWeztermAvailabilityForTesting();
+    });
+
+    it("returns available=false when WEZTERM_PANE is unset (envVar.set=false regardless of binary)", () => {
+      delete process.env.WEZTERM_PANE;
+      const result = _weztermAvailability();
+      assert.equal(result.envVar.set, false);
+      assert.equal(result.envVar.value, "");
+      // available is the conjunction of all three checks; with envVar unset it must be false.
+      assert.equal(result.available, false);
+    });
+
+    it("returns available=false when WEZTERM_PANE is empty string", () => {
+      process.env.WEZTERM_PANE = "";
+      const result = _weztermAvailability();
+      assert.equal(result.envVar.set, false);
+      assert.equal(result.envVar.value, "");
+      assert.equal(result.available, false);
+    });
+
+    it("reports envVar.set=true with the value when WEZTERM_PANE is non-empty", () => {
+      process.env.WEZTERM_PANE = "3";
+      const result = _weztermAvailability();
+      assert.equal(result.envVar.set, true);
+      assert.equal(result.envVar.value, "3");
+      // available must equal the conjunction of envVar.set && binary.found && liveness.ok.
+      assert.equal(result.available, result.envVar.set && result.binary.found && result.liveness.ok);
+    });
+
+    it("short-circuits binary/liveness checks (memoized) after first call", () => {
+      delete process.env.WEZTERM_PANE;
+      const r1 = _weztermAvailability();
+      const r2 = _weztermAvailability();
+      assert.equal(r1, r2, "should return the same memoized object");
+    });
+
+    it("reflects the env-only case: env set but binary/liveness may be false → available=false", () => {
+      process.env.WEZTERM_PANE = "3";
+      const result = _weztermAvailability();
+      // Verify the structural invariant: available is the conjunction of all three.
+      assert.equal(result.available, result.envVar.set && result.binary.found && result.liveness.ok);
     });
   });
 });
