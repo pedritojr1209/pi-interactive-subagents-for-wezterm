@@ -2,7 +2,23 @@
 
 Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
 
-**tmux-only fork.** See [Acknowledgements](#acknowledgements) for the upstream project, which also supports cmux, zellij, and WezTerm.
+**tmux and WezTerm subagents.** Supports native WezTerm multiplexing on Windows alongside tmux on POSIX. See [Acknowledgements](#acknowledgements) for the upstream project.
+
+## Installation & Setup
+
+- **Remote install:**
+  ```
+  pi install git:github.com/pedritojr1209/pi-interactive-subagents-for-wezterm
+  ```
+- **Local development / Manual (Windows pwsh):**
+  ```powershell
+  Copy-Item -Recurse -Force ".\pi-extension\subagents" "$HOME\.pi\agent\extensions\subagents"
+  ```
+- **On-the-fly / Ephemeral run:**
+  ```
+  pi -e ./pi-extension/subagents/index.ts
+  ```
+- **Windows prerequisite:** Run inside WezTerm with `pwsh` as your default shell.
 
 ## How it works
 
@@ -175,14 +191,49 @@ Status display is configured via `config.json` in the extension directory (copy 
 }
 ```
 
+## Mux Configuration
+
+The multiplexer is selected at startup based on `PI_SUBAGENT_MUX`:
+- `PI_SUBAGENT_MUX=wezterm` — force WezTerm surface
+- `PI_SUBAGENT_MUX=tmux` — force tmux surface
+- `PI_SUBAGENT_MUX=auto` (default) — auto-detect: if both `$WEZTERM_PANE` and `$TMUX` are set, `$WEZTERM_PANE` wins
+- unset — auto-detect with `$WEZTERM_PANE` preferred
+
+Mux availability requires: env-var set, binary on PATH, and liveness probe (memoized per module load). All three checks run once per module load and are memoized. Failure marks the mux as `available: false` with the per-check breakdown visible in diagnostics.
+
 ## Requirements
 
 - [pi](https://github.com/badlogic/pi-mono)
 - [tmux](https://github.com/tmux/tmux)
+- [wezterm](https://wezterm.org/) — terminal multiplexer for Windows (requires `wezterm` CLI on PATH)
+- [pwsh](https://github.com/powershell/powershell) — PowerShell 7+ for WezTerm long-command launcher mechanics
+- [Windows 10/11] — WezTerm is the primary multiplexer on Windows; tmux is primary on POSIX
 
 ```bash
 tmux new -A -s pi 'pi'
 ```
+
+## Model Inheritance (Ticket 8 / Issue #9)
+
+The `resolveEffectiveModel` function resolves the model loadout in this priority order:
+1. Explicit `params.model` (caller-provided)
+2. Agent frontmatter `model`
+3. Parent context `ctx.model` (inherited provider/id e.g. `openrouter/z-ai/glm-5.2`)
+4. `undefined` (when no source resolves)
+
+This is enforced at spawn time and replayed on resume via the loadout snapshot.
+
+## Architecture References
+
+- [ADR 0001](docs/adr/0001-mux-dispatcher.md) — Mux dispatcher architecture: PI_SUBAGENT_MUX precedence, auto-detect, and mux availability.
+- [ADR 0002](docs/adr/0002-wezterm-e2e-verification.md) — End-to-end verification: `npm test` (203 unit tests), `npm run test:wezterm` (WezTerm surface integration), and `npm run test:integration:all`.
+
+## Developer Instructions
+
+Run the test suite:
+- `npm test` — runs 203 unit tests (tmux surface + session model inheritance)
+- `npm run test:wezterm` — runs WezTerm surface integration tests (requires WezTerm on Windows)
+- `npm run test:integration:all` — runs all integration tests
 
 ## Acknowledgements
 
