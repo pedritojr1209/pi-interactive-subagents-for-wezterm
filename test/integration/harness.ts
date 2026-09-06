@@ -2,11 +2,14 @@
  * Integration test harness for pi-interactive-subagents.
  *
  * Provides utilities to:
- * - Detect whether tmux is available
+ * - Detect which mux types are available (tmux and/or wezterm)
  * - Create isolated test environments with test agent definitions
- * - Start real pi sessions in tmux panes
+ * - Start real pi sessions in mux panes
  * - Poll for file creation and screen output
  * - Clean up panes and temp files after tests
+ *
+ * Mux-agnostic: surface primitives (createSurface, sendCommand, etc.) are
+ * imported from mux.ts, which dispatches to the active mux at runtime.
  */
 import { execFileSync } from "node:child_process";
 import {
@@ -32,9 +35,10 @@ import {
   readScreenAsync,
   closeSurface,
   shellEscape,
-} from "../../pi-extension/subagents/tmux.ts";
+} from "../../pi-extension/subagents/mux.ts";
+import { _muxAvailability, getActiveMux } from "../../pi-extension/subagents/mux.ts";
 
-// Re-export tmux primitives for tests
+// Re-export mux-agnostic primitives for tests
 export {
   createSurface,
   createSurfaceSplit,
@@ -76,19 +80,69 @@ export const PI_TIMEOUT = Number(process.env.PI_TEST_TIMEOUT ?? "120000");
 // ── Backend detection ──
 
 /**
- * Detect whether tmux is available in the current environment.
- * Returns ["tmux"] or [].
+ * Detect which mux types are available in the current environment.
+ * Returns a list containing "tmux" and/or "wezterm" depending on which
+ * mux is active and responsive. Returns [] when neither is available.
+ */
+export function getAvailableMuxes(): string[] {
+  const avail = _muxAvailability();
+  const muxes: string[] = [];
+  if (avail.envVar.tmux && avail.envVar.wezterm !== "0") {
+    // Both env vars set — wezterm wins per ADR 0001, but we detect both
+    muxes.push("wezterm");
+  }
+  if (avail.available) {
+    muxes.push(avail.active);
+  } else if (avail.envVar.tmux || avail.envVar.wezterm) {
+    // Env var present but binary/liveness failed — still report the mux type
+    // so the test knows it was attempted but is unavailable
+    if (avail.envVar.wezterm && !muxes.includes("wezterm")) muxes.push("wezterm");
+    if (avail.envVar.tmux && !muxes.includes("tmux")) muxes.push("tmux");
+  }
+  return [...new Set(muxes)];
+}
+
+/**
+ * Backward-compatible alias for getAvailableMuxes().
+ * @deprecated Use getAvailableMuxes() instead.
  */
 export function getAvailableBackends(): string[] {
-  return isMuxAvailable() ? ["tmux"] : [];
+  return getAvailableMuxes();
 }
 
+/**
+ * Focus a surface (pane) so subsequent screen reads reflect the active pane.
+ * Mux-agnostic: delegates to tmux or wezterm based on the active mux.
+ */
 export function focusSurface(surface: string): void {
-  execFileSync("tmux", ["select-pane", "-t", surface], { encoding: "utf8" });
+  const { active } = getActiveMux();
+  if (active === "wezterm") {
+    execFileSync("wezterm", ["cli", "activate-pane", "--pane-id", surface], {
+      encoding: "utf8",
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } else {
+    execFileSync("tmux", ["select-pane", "-t", surface], { encoding: "utf8" });
+  }
 }
 
+/**
+ * Get the currently focused surface (pane) id, or null if it cannot be determined.
+ * Mux-agnostic: delegates to tmux or wezterm based on the active mux.
+ */
 export function getFocusedSurface(): string | null {
+  const { active } = getActiveMux();
   try {
+    if (active === "wezterm") {
+      const output = execFileSync(
+        "wezterm",
+        ["cli", "list", "--format", "json"],
+        { encoding: "utf8" },
+      );
+      const panes = JSON.parse(output) as Array<{ pane_id: string; is_active: boolean }>;
+      const activepane = panes.find((p) => p.is_active);
+      return activepane ? activepane.pane_id : null;
+    }
     const panes = execFileSync("tmux", ["list-panes", "-F", "#{pane_id} #{pane_active}"], {
       encoding: "utf8",
     });
@@ -99,18 +153,24 @@ export function getFocusedSurface(): string | null {
   }
 }
 
+/**
+ * Wait for a specific surface to become the focused surface.
+ * Mux-agnostic: works with both tmux and wezterm.
+ */
 export async function waitForFocusedSurface(
   surface: string,
   timeout: number = PI_TIMEOUT,
 ): Promise<void> {
   const start = Date.now();
+  const { active } = getActiveMux();
+  const muxName = active === "wezterm" ? "wezterm" : "tmux";
   while (Date.now() - start < timeout) {
     if (getFocusedSurface() === surface) return;
     await sleep(200);
   }
 
   throw new Error(
-    `Timeout (${timeout}ms) waiting for focused tmux pane ${surface}; ` +
+    `Timeout (${timeout}ms) waiting for focused ${muxName} pane ${surface}; ` +
       `current focus is ${getFocusedSurface() ?? "unknown"}`,
   );
 }
@@ -199,8 +259,16 @@ export function untrackSurface(env: TestEnv, surface: string): void {
  * Start a pi session in a mux surface with the subagents extension loaded.
  * Returns immediately — the pi process runs asynchronously in the surface.
  *
- * The command ends with a sentinel so we can detect when pi exits:
- *   `pi ...; echo '__TEST_DONE_'$?'__'`
+ * The command ends with a sentinel so we can detect when pi exits.
+ * The sentinel syntax differs by mux:
+ *   - tmux (bash):  `...; echo '__TEST_DONE_'$?'__'`
+ *   - wezterm (pwsh): sendLongCommand already appends `Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"`
+ *     so we only append the exit-sentinel wrapper for tmux.
+ *
+ * Mux-agnostic: detects the active mux via getActiveMux() and builds the
+ * appropriate command syntax. Uses shellEscape from mux.ts, which delegates
+ * to the active mux's escape rules (POSIX single-quote for tmux, pwsh
+ * single-quote doubling for wezterm).
  */
 export function startPi(
   surface: string,
@@ -210,13 +278,16 @@ export function startPi(
 ): void {
   const model = opts?.model ?? TEST_MODEL;
   const extra = opts?.extraArgs ?? "";
+  const { active } = getActiveMux();
+  const isWezterm = active === "wezterm";
 
-  // Force pi to load the working-tree extension (not an installed pi-package
-  // snapshot). `-ne` disables extension auto-discovery, `-e <path>` loads the
-  // current branch's source directly. Without this, the tests silently run
-  // against whatever version is checked out under `~/.pi/agent/git/...`.
-  const cmd = [
-    `cd ${shellEscape(testDir)} &&`,
+  // Build the pi launch command. On pwsh (wezterm), `cd` works but we use
+  // Set-Location for clarity. The `&&` chain operator works in pwsh 7+.
+  const cdPrefix = isWezterm
+    ? `Set-Location ${shellEscape(testDir)}; `
+    : `cd ${shellEscape(testDir)} && `;
+
+  const cmdParts = [
     `pi`,
     `-ne`,
     `-e ${shellEscape(EXTENSION_SOURCE)}`,
@@ -227,9 +298,19 @@ export function startPi(
     .filter(Boolean)
     .join(" ");
 
-  sendLongCommand(surface, `${cmd}; echo '__TEST_DONE_'$?'__'`, {
-    scriptPath: join(testDir, `test-launch-${Date.now()}.sh`),
-  });
+  const fullCmd = cdPrefix + cmdParts;
+
+  // For wezterm, sendLongCommand appends the __SUBAGENT_DONE_ sentinel
+  // automatically. For tmux, we need to append __TEST_DONE_.
+  if (isWezterm) {
+    sendLongCommand(surface, fullCmd, {
+      scriptPath: join(testDir, `test-launch-${Date.now()}.sh`),
+    });
+  } else {
+    sendLongCommand(surface, `${fullCmd}; echo '__TEST_DONE_'$?'__'`, {
+      scriptPath: join(testDir, `test-launch-${Date.now()}.sh`),
+    });
+  }
 }
 
 // ── Polling helpers ──
@@ -288,13 +369,17 @@ export async function waitForFile(
 /**
  * Wait for the pi process in a surface to exit (sentinel detection).
  * Returns the exit code.
+ *
+ * Mux-agnostic: matches either the `__TEST_DONE_<n>__` sentinel (appended
+ * by startPi for tmux/bash) or the `__SUBAGENT_DONE_<n>__` sentinel
+ * (appended by wezterm.ts:sendLongCommand for wezterm/pwsh).
  */
 export async function waitForPiExit(
   surface: string,
   timeout: number = PI_TIMEOUT,
 ): Promise<number> {
-  const screen = await waitForScreen(surface, /__TEST_DONE_(\d+)__/, timeout);
-  const match = screen.match(/__TEST_DONE_(\d+)__/);
+  const screen = await waitForScreen(surface, /__(?:TEST|SUBAGENT)_DONE_(\d+)__/, timeout);
+  const match = screen.match(/__(?:TEST|SUBAGENT)_DONE_(\d+)__/);
   return match ? parseInt(match[1], 10) : -1;
 }
 

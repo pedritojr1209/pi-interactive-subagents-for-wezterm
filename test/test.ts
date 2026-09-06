@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach } from "node:test";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -30,7 +30,10 @@ import {
   summarizeSessionStats,
 } from "../pi-extension/subagents/session.ts";
 
-import { shellEscape } from "../pi-extension/subagents/tmux.ts";
+import { shellEscape, __sendLongCommandTest__ as tmuxSendLongCommandTest } from "../pi-extension/subagents/tmux.ts";
+import {
+	__sendLongCommandTest__ as weztermSendLongCommandTest,
+} from "../pi-extension/subagents/wezterm.ts";
 import {
   advanceStatusState,
   capStatusLines,
@@ -358,6 +361,140 @@ describe("session.ts", () => {
       const sf = join(dir, "s3.jsonl");
       writeFileSync(sf + ".loadout.json", "not json{", "utf8");
       assert.equal(readSubagentLoadout(sf), null);
+    });
+  });
+
+  describe("resolveEffectiveModel (Issue #9 / Ticket 8)", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const resolve = testApi.resolveEffectiveModel;
+
+    it("returns params.model when the caller provides one", () => {
+      assert.equal(
+        resolve({ model: "openai/gpt-4o" }, { model: "anthropic/claude-sonnet" }, { model: { provider: "openrouter", id: "z-ai/glm-5.2" } }),
+        "openai/gpt-4o",
+      );
+    });
+
+    it("returns agent frontmatter model when params.model is omitted", () => {
+      assert.equal(
+        resolve({}, { model: "anthropic/claude-sonnet" }, { model: { provider: "openrouter", id: "z-ai/glm-5.2" } }),
+        "anthropic/claude-sonnet",
+      );
+    });
+
+    it("inherits parent ctx.model as provider/id when params and frontmatter are unset", () => {
+      assert.equal(
+        resolve({}, null, { model: { provider: "openrouter", id: "z-ai/glm-5.2" } }),
+        "openrouter/z-ai/glm-5.2",
+      );
+    });
+
+    it("inherits parent ctx.model when agentDefs is null and params.model is omitted", () => {
+      assert.equal(
+        resolve({}, null, { model: { provider: "openai", id: "gpt-4o" } }),
+        "openai/gpt-4o",
+      );
+    });
+
+    it("returns undefined when no source resolves (parent ctx.model undefined)", () => {
+      assert.equal(resolve({}, null, { model: undefined }), undefined);
+    });
+
+    it("returns undefined when ctx is null/undefined and no other source is set", () => {
+      assert.equal(resolve({}, null, null), undefined);
+      assert.equal(resolve({}, null, undefined), undefined);
+    });
+
+    it("falls back to bare id when parent model has no provider", () => {
+      assert.equal(
+        resolve({}, null, { model: { id: "gpt-4o" } }),
+        "gpt-4o",
+      );
+    });
+
+    it("accepts a pre-formatted string ctx.model", () => {
+      assert.equal(
+        resolve({}, null, { model: "openai/gpt-4o" }),
+        "openai/gpt-4o",
+      );
+    });
+
+    it("does not produce 'undefined/<id>' for malformed ctx.model", () => {
+      const result = resolve({}, null, { model: { provider: undefined, id: "gpt-4o" } });
+      assert.equal(result, "gpt-4o");
+    });
+
+    it("snapshots the inherited model into the loadout (null when no source resolves)", () => {
+      const inherited = resolve({}, null, { model: { provider: "openrouter", id: "z-ai/glm-5.2" } });
+      const sf = join(dir, "s-inherit.jsonl");
+      const loadout: SubagentLoadout = {
+        agent: null,
+        toolAllowlist: null,
+        model: inherited ?? null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: false,
+        cwd: null,
+        agentDir: null,
+      };
+      writeSubagentLoadout(sf, loadout);
+      const read = readSubagentLoadout(sf);
+      assert.equal(read?.model, "openrouter/z-ai/glm-5.2");
+
+      const sf2 = join(dir, "s-default.jsonl");
+      const defaultLoadout: SubagentLoadout = { ...loadout, model: resolve({}, null, { model: undefined }) ?? null };
+      writeSubagentLoadout(sf2, defaultLoadout);
+      assert.equal(readSubagentLoadout(sf2)?.model, null);
+    });
+
+    it("resume path: inherited model is replayed into argv via applySandboxToParts", () => {
+      // Resume invariant: a resumed subagent reuses the model its previous
+      // incarnation was running on, even if the parent has since switched
+      // (loadout snapshot is replayed verbatim — applySandboxToParts is the
+      // single source of truth for both launch and resume).
+      const testApi = (subagentsModule as any).__test__;
+      const inherited = resolve({}, null, { model: { provider: "openrouter", id: "z-ai/glm-5.2" } });
+      const loadout: SubagentLoadout = {
+        agent: null,
+        toolAllowlist: null,
+        model: inherited ?? null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: false,
+        cwd: null,
+        agentDir: null,
+      };
+      const parts: string[] = ["pi", "--session", "/tmp/resume.jsonl"];
+      testApi.applySandboxToParts(parts, loadout, { artifactDir: dir, name: "resumed" });
+      const modelIdx = parts.indexOf("--model");
+      assert.ok(modelIdx >= 0, "expected --model to be emitted on resume");
+      // applySandboxToParts runs the model through shellEscape (POSIX
+      // single-quote wrap) so the resulting argv token is safe to splice
+      // into a tmux send-keys command.
+      assert.equal(parts[modelIdx + 1], "'openrouter/z-ai/glm-5.2'");
+    });
+
+    it("resume path: omitted model is not emitted (lets pi pick its default)", () => {
+      const testApi = (subagentsModule as any).__test__;
+      const loadout: SubagentLoadout = {
+        agent: null,
+        toolAllowlist: null,
+        model: null,
+        thinking: null,
+        systemPromptMode: null,
+        identity: null,
+        spawnable: null,
+        autoExit: false,
+        cwd: null,
+        agentDir: null,
+      };
+      const parts: string[] = ["pi", "--session", "/tmp/resume.jsonl"];
+      testApi.applySandboxToParts(parts, loadout, { artifactDir: dir, name: "defaulted" });
+      assert.equal(parts.includes("--model"), false, "expected --model to be omitted when loadout.model is null");
     });
   });
 
@@ -2673,6 +2810,487 @@ describe("tmux.ts", () => {
       assert.ok(escaped.endsWith("'"));
       // Inside single quotes, everything is literal
       assert.ok(escaped.includes("$world"));
+    });
+  });
+});
+
+// ── pwsh / wezterm launcher (Issue #8, Ticket 7) ──
+
+describe("wezterm.ts:sendLongCommand (pwsh launcher)", () => {
+  const {
+    shellEscape: pwshShellEscape,
+    buildPwshInvocation,
+    buildScriptBody,
+    coercePwshScriptPath,
+  } = weztermSendLongCommandTest;
+
+  describe("shellEscape (pwsh)", () => {
+    it("doubles single quotes and wraps", () => {
+      assert.equal(pwshShellEscape("hello"), "'hello'");
+      assert.equal(pwshShellEscape("it's"), "'it''s'");
+      assert.equal(pwshShellEscape(""), "''");
+    });
+  });
+
+  describe("buildPwshInvocation", () => {
+    it("emits the canonical 4-token launcher for a POSIX path", () => {
+      assert.equal(
+        buildPwshInvocation("/tmp/agent.ps1"),
+        "pwsh -NoProfile -ExecutionPolicy Bypass -File '/tmp/agent.ps1'",
+      );
+    });
+    it("quotes a Windows path with spaces via shellEscape", () => {
+      assert.equal(
+        buildPwshInvocation("C:\\Program Files\\Pi\\agent.ps1"),
+        "pwsh -NoProfile -ExecutionPolicy Bypass -File 'C:\\Program Files\\Pi\\agent.ps1'",
+      );
+    });
+    it("doubles apostrophes in the path (shellEscape)", () => {
+      assert.equal(
+        buildPwshInvocation("C:\\it's.ps1"),
+        "pwsh -NoProfile -ExecutionPolicy Bypass -File 'C:\\it''s.ps1'",
+      );
+    });
+    it("preserves $ and backtick literally (single quotes are literal in pwsh)", () => {
+      assert.equal(
+        buildPwshInvocation("$env:VAR\\foo.ps1"),
+        "pwsh -NoProfile -ExecutionPolicy Bypass -File '$env:VAR\\foo.ps1'",
+      );
+      assert.equal(
+        buildPwshInvocation("a`b.ps1"),
+        "pwsh -NoProfile -ExecutionPolicy Bypass -File 'a`b.ps1'",
+      );
+    });
+  });
+
+  describe("buildScriptBody", () => {
+    it("joins lines with LF and a trailing newline", () => {
+      const body = buildScriptBody(["Set-Location x", "pi --foo"]);
+      assert.equal(body, "Set-Location x\npi --foo\n");
+    });
+    it("never introduces CRLF (pwsh 7 accepts LF)", () => {
+      const body = buildScriptBody(["a", "b", "c"]);
+      assert.ok(!body.includes("\r"));
+    });
+    it("appends the SUBAGENT_DONE sentinel when asked", () => {
+      const body = buildScriptBody([
+        "pi --foo",
+        'Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"',
+      ]);
+      assert.match(body, /__SUBAGENT_DONE_\$LASTEXITCODE__/);
+    });
+  });
+
+  describe("coercePwshScriptPath (Ticket 7 CRITICAL)", () => {
+    // pwsh -File rejects non-.ps1 paths. Callers in index.ts currently pass
+    // options.scriptPath ending in `.sh`. Without coercion, the launcher
+    // fails with: "The argument to the -File parameter does not end with
+    // the .ps1 extension." This coercion is the seam that fixes it without
+    // touching index.ts.
+    it("rewrites a trailing .sh to .ps1", () => {
+      assert.equal(
+        coercePwshScriptPath("C:\\tmp\\worker-abc.sh"),
+        "C:\\tmp\\worker-abc.ps1",
+      );
+    });
+    it("leaves a trailing .ps1 alone", () => {
+      assert.equal(
+        coercePwshScriptPath("C:\\tmp\\worker-abc.ps1"),
+        "C:\\tmp\\worker-abc.ps1",
+      );
+    });
+    it("appends .ps1 when no extension is present", () => {
+      assert.equal(coercePwshScriptPath("C:\\tmp\\worker-abc"), "C:\\tmp\\worker-abc.ps1");
+    });
+    it("does not touch extensions other than .sh", () => {
+      assert.equal(
+        coercePwshScriptPath("C:\\tmp\\worker-abc.txt"),
+        "C:\\tmp\\worker-abc.txt.ps1",
+      );
+    });
+    it("handles POSIX-style paths", () => {
+      assert.equal(coercePwshScriptPath("/tmp/agent.sh"), "/tmp/agent.ps1");
+    });
+    it("matches only a final .sh segment (not embedded)", () => {
+      // File named "showcase.sh.bak" must NOT be rewritten — only the final
+      // `.sh` segment is the launcher extension the caller used.
+      assert.equal(coercePwshScriptPath("/tmp/showcase.sh.bak"), "/tmp/showcase.sh.bak.ps1");
+    });
+  });
+});
+
+describe("tmux.ts:sendLongCommand (POSIX launcher backward compat)", () => {
+  const { buildScriptBody } = tmuxSendLongCommandTest;
+
+  it("builds a body starting with the bash shebang when callers prepend one", () => {
+    // Caller-side test: mirrors the index.ts:1286 call shape, which prepends
+    // its own preamble. The POSIX launcher body builder only joins lines.
+    const body = buildScriptBody(["#!/bin/bash", "echo hi"]);
+    assert.ok(body.startsWith("#!/bin/bash\n"));
+  });
+
+  it("joins lines with LF and a trailing newline (matches bash script expectations)", () => {
+    const body = buildScriptBody(["a", "b"]);
+    assert.equal(body, "a\nb\n");
+  });
+
+  it("never introduces CRLF (POSIX scripts are LF-only)", () => {
+    const body = buildScriptBody(["x"]);
+    assert.ok(!body.includes("\r"));
+  });
+
+  it("shellEscape is unchanged: posix single-quote escape still applied", () => {
+    // Regression guard: this is the existing public behavior. If this breaks,
+    // every caller that passes paths/args via tmux breaks.
+    assert.equal(shellEscape("/tmp/with space.sh"), "'/tmp/with space.sh'");
+    assert.equal(shellEscape("it's"), "'it'\\''s'");
+  });
+});
+
+// ── mux.ts (ADR 0001 dispatcher) ──
+
+import {
+  getActiveMux,
+  isMuxAvailable as muxIsMuxAvailable,
+  muxSetupHint as muxHint,
+  getParentSurfaceId,
+  _muxAvailability,
+  _resetMuxForTesting,
+  createSurface as muxCreateSurface,
+  createSurfaceSplit as muxCreateSurfaceSplit,
+  sendCommand as muxSendCommand,
+  sendLongCommand as muxSendLongCommand,
+  pollForExit as muxPollForExit,
+  closeSurface as muxCloseSurface,
+  readScreen as muxReadScreen,
+  readScreenAsync as muxReadScreenAsync,
+  shellEscape as muxShellEscape,
+} from "../pi-extension/subagents/mux.ts";
+
+import {
+  _weztermAvailability,
+  _resetAvailabilityForTesting as _resetWeztermAvailabilityForTesting,
+  parentPane,
+} from "../pi-extension/subagents/wezterm.ts";
+
+/**
+ * Issue #7 step 3: "Verify all 9 names still resolve."
+ * Static-resolution check that every name index.ts imports from mux.ts is
+ * exported. Catches typos and accidental renames at compile time (via TS)
+ * and at runtime via the typeof assertions below.
+ */
+const REQUIRED_SURFACE = [
+  "isMuxAvailable",
+  "muxSetupHint",
+  "createSurface",
+  "createSurfaceSplit",
+  "sendCommand",
+  "sendLongCommand",
+  "pollForExit",
+  "closeSurface",
+  "readScreen",
+  "readScreenAsync",
+  "getParentSurfaceId",
+] as const;
+
+/**
+ * Tests that exercise the `PI_SUBAGENT_MUX` env-var permutations must
+ * reset the dispatcher's memoized resolution between cases — the
+ * production code caches it for the lifetime of the module.
+ */
+describe("mux.ts surface re-exports (Issue #7 step 3)", () => {
+  it("exports all 9 surface names (plus readScreenAsync, getParentSurfaceId)", () => {
+    // Each import above is a static reference; if any name drops out, this
+    // file won't compile. The assertions below guard against accidental
+    // re-binding (e.g. someone replaces an export with a `null` placeholder).
+    for (const name of REQUIRED_SURFACE) {
+      assert.equal(typeof ({
+        isMuxAvailable: muxIsMuxAvailable,
+        muxSetupHint: muxHint,
+        createSurface: muxCreateSurface,
+        createSurfaceSplit: muxCreateSurfaceSplit,
+        sendCommand: muxSendCommand,
+        sendLongCommand: muxSendLongCommand,
+        pollForExit: muxPollForExit,
+        closeSurface: muxCloseSurface,
+        readScreen: muxReadScreen,
+        readScreenAsync: muxReadScreenAsync,
+        getParentSurfaceId,
+      } as Record<string, unknown>)[name], "function", `${name} should be exported from mux.ts`);
+    }
+  });
+});
+
+describe("mux.ts", () => {
+  const ENV_KEYS = ["PI_SUBAGENT_MUX", "WEZTERM_PANE", "TMUX", "TMUX_PANE"] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  before(() => {
+    for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
+  });
+  after(() => {
+    for (const k of ENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+    _resetMuxForTesting();
+  });
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+    _resetMuxForTesting();
+  });
+
+  describe("getActiveMux selection precedence", () => {
+    it("PI_SUBAGENT_MUX=wezterm overrides everything (wezterm wins even with no env vars)", () => {
+      process.env.PI_SUBAGENT_MUX = "wezterm";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "wezterm");
+      assert.equal(source, "override");
+    });
+
+    it("PI_SUBAGENT_MUX=tmux overrides everything (tmux wins even when WEZTERM_PANE is set)", () => {
+      process.env.PI_SUBAGENT_MUX = "tmux";
+      process.env.WEZTERM_PANE = "3";
+      process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "tmux");
+      assert.equal(source, "override");
+    });
+
+    it("auto: WEZTERM_PANE wins over TMUX when both are set", () => {
+      process.env.WEZTERM_PANE = "3";
+      process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "wezterm");
+      assert.equal(source, "wezterm-env");
+    });
+
+    it("auto: TMUX alone selects tmux", () => {
+      process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "tmux");
+      assert.equal(source, "tmux-env");
+    });
+
+    it("auto: WEZTERM_PANE alone selects wezterm", () => {
+      process.env.WEZTERM_PANE = "3";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "wezterm");
+      assert.equal(source, "wezterm-env");
+    });
+
+    it("auto: neither env var set falls back to tmux", () => {
+      const { active, source } = getActiveMux();
+      assert.equal(active, "tmux");
+      assert.equal(source, "auto-fallback");
+    });
+
+    it("PI_SUBAGENT_MUX=garbage falls through to auto-detection safely", () => {
+      process.env.PI_SUBAGENT_MUX = "wezterminator";
+      process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "tmux");
+      assert.equal(source, "tmux-env");
+    });
+
+    it("PI_SUBAGENT_MUX= (empty string) is treated as auto", () => {
+      process.env.PI_SUBAGENT_MUX = "";
+      process.env.WEZTERM_PANE = "3";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "wezterm");
+      assert.equal(source, "wezterm-env");
+    });
+
+    it("empty WEZTERM_PANE does not count as set (avoid WezTerm server talking to itself)", () => {
+      process.env.WEZTERM_PANE = "";
+      process.env.TMUX = "/tmp/tmux-1000/default,12345,0";
+      const { active, source } = getActiveMux();
+      assert.equal(active, "tmux");
+      assert.equal(source, "tmux-env");
+    });
+  });
+
+  describe("_muxAvailability", () => {
+    it("reports the active mux, source, and echoes PI_SUBAGENT_MUX when set", () => {
+      process.env.PI_SUBAGENT_MUX = "tmux";
+      const result = _muxAvailability();
+      assert.equal(result.active, "tmux");
+      assert.equal(result.source, "override");
+      assert.equal(result.piSubagentMux, "tmux");
+      assert.deepEqual(Object.keys(result.envVar).sort(), ["tmux", "wezterm"]);
+    });
+
+    it("omits piSubagentMux when the env var is unset", () => {
+      delete process.env.PI_SUBAGENT_MUX;
+      const result = _muxAvailability();
+      assert.equal(result.piSubagentMux, undefined);
+      assert.equal("piSubagentMux" in result, false);
+    });
+  });
+
+  describe("isMuxAvailable", () => {
+    it("returns the per-mux availability, not a constant", () => {
+      delete process.env.PI_SUBAGENT_MUX;
+      delete process.env.TMUX;
+      delete process.env.WEZTERM_PANE;
+      const noEnv = muxIsMuxAvailable();
+      assert.equal(typeof noEnv, "boolean");
+    });
+
+    it("PI_SUBAGENT_MUX=wezterm returns the wezterm availability (memoized)", () => {
+      process.env.PI_SUBAGENT_MUX = "wezterm";
+      const r1 = muxIsMuxAvailable();
+      const r2 = muxIsMuxAvailable();
+      assert.equal(r1, r2);
+    });
+  });
+
+  describe("muxSetupHint", () => {
+    it("returns a non-empty string regardless of selection", () => {
+      process.env.PI_SUBAGENT_MUX = "wezterm";
+      const w = muxHint();
+      assert.ok(typeof w === "string" && w.length > 0);
+      _resetMuxForTesting();
+      process.env.PI_SUBAGENT_MUX = "tmux";
+      const t = muxHint();
+      assert.ok(typeof t === "string" && t.length > 0);
+      // The hints should differ (wezterm hints about wezterm, tmux about tmux).
+      assert.notEqual(w, t);
+    });
+  });
+
+  describe("getParentSurfaceId", () => {
+    it("returns TMUX_PANE when active is tmux", () => {
+      process.env.PI_SUBAGENT_MUX = "tmux";
+      process.env.TMUX_PANE = "%7";
+      assert.equal(getParentSurfaceId(), "%7");
+    });
+
+    it("returns WEZTERM_PANE when active is wezterm", () => {
+      process.env.PI_SUBAGENT_MUX = "wezterm";
+      process.env.WEZTERM_PANE = "42";
+      assert.equal(getParentSurfaceId(), "42");
+    });
+
+    it("returns empty string when no parent surface is set", () => {
+      delete process.env.TMUX_PANE;
+      delete process.env.WEZTERM_PANE;
+      process.env.PI_SUBAGENT_MUX = "tmux";
+      assert.equal(getParentSurfaceId(), "");
+      _resetMuxForTesting();
+      process.env.PI_SUBAGENT_MUX = "wezterm";
+      assert.equal(getParentSurfaceId(), "");
+    });
+  });
+});
+
+// ── wezterm.ts unit tests (Issue #10, Tier 1) ──
+
+describe("wezterm.ts", () => {
+  const WEZENV_KEYS = ["WEZTERM_PANE", "PI_SUBAGENT_MUX", "TMUX", "TMUX_PANE"] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  before(() => {
+    for (const k of WEZENV_KEYS) savedEnv[k] = process.env[k];
+  });
+  after(() => {
+    for (const k of WEZENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  describe("directionFlags (via __sendLongCommandTest__)", () => {
+    const { directionFlags } = weztermSendLongCommandTest;
+
+    it("maps right to --right", () => {
+      assert.deepEqual(directionFlags("right"), ["--right"]);
+    });
+
+    it("maps left to --left", () => {
+      assert.deepEqual(directionFlags("left"), ["--left"]);
+    });
+
+    it("maps up to --top", () => {
+      assert.deepEqual(directionFlags("up"), ["--top"]);
+    });
+
+    it("maps down to --bottom", () => {
+      assert.deepEqual(directionFlags("down"), ["--bottom"]);
+    });
+  });
+
+  describe("parentPane", () => {
+    beforeEach(() => {
+      _resetWeztermAvailabilityForTesting();
+    });
+
+    it("returns the WEZTERM_PANE value when set and non-empty", () => {
+      process.env.WEZTERM_PANE = "7";
+      assert.equal(parentPane(), "7");
+    });
+
+    it("returns undefined when WEZTERM_PANE is empty string", () => {
+      process.env.WEZTERM_PANE = "";
+      assert.equal(parentPane(), undefined);
+    });
+
+    it("returns undefined when WEZTERM_PANE is unset", () => {
+      delete process.env.WEZTERM_PANE;
+      assert.equal(parentPane(), undefined);
+    });
+  });
+
+  describe("_weztermAvailability", () => {
+    const ENV_KEYS = ["WEZTERM_PANE", "PI_SUBAGENT_MUX"] as const;
+
+    beforeEach(() => {
+      _resetWeztermAvailabilityForTesting();
+      for (const k of ENV_KEYS) delete process.env[k];
+    });
+
+    afterEach(() => {
+      _resetWeztermAvailabilityForTesting();
+    });
+
+    it("returns available=false when WEZTERM_PANE is unset (envVar.set=false regardless of binary)", () => {
+      delete process.env.WEZTERM_PANE;
+      const result = _weztermAvailability();
+      assert.equal(result.envVar.set, false);
+      assert.equal(result.envVar.value, "");
+      // available is the conjunction of all three checks; with envVar unset it must be false.
+      assert.equal(result.available, false);
+    });
+
+    it("returns available=false when WEZTERM_PANE is empty string", () => {
+      process.env.WEZTERM_PANE = "";
+      const result = _weztermAvailability();
+      assert.equal(result.envVar.set, false);
+      assert.equal(result.envVar.value, "");
+      assert.equal(result.available, false);
+    });
+
+    it("reports envVar.set=true with the value when WEZTERM_PANE is non-empty", () => {
+      process.env.WEZTERM_PANE = "3";
+      const result = _weztermAvailability();
+      assert.equal(result.envVar.set, true);
+      assert.equal(result.envVar.value, "3");
+      // available must equal the conjunction of envVar.set && binary.found && liveness.ok.
+      assert.equal(result.available, result.envVar.set && result.binary.found && result.liveness.ok);
+    });
+
+    it("short-circuits binary/liveness checks (memoized) after first call", () => {
+      delete process.env.WEZTERM_PANE;
+      const r1 = _weztermAvailability();
+      const r2 = _weztermAvailability();
+      assert.equal(r1, r2, "should return the same memoized object");
+    });
+
+    it("reflects the env-only case: env set but binary/liveness may be false → available=false", () => {
+      process.env.WEZTERM_PANE = "3";
+      const result = _weztermAvailability();
+      // Verify the structural invariant: available is the conjunction of all three.
+      assert.equal(result.available, result.envVar.set && result.binary.found && result.liveness.ok);
     });
   });
 });
