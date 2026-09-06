@@ -2822,6 +2822,7 @@ describe("wezterm.ts:sendLongCommand (pwsh launcher)", () => {
     buildPwshInvocation,
     buildScriptBody,
     coercePwshScriptPath,
+    bashToPwshParts,
   } = weztermSendLongCommandTest;
 
   describe("shellEscape (pwsh)", () => {
@@ -2878,6 +2879,56 @@ describe("wezterm.ts:sendLongCommand (pwsh launcher)", () => {
         'Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"',
       ]);
       assert.match(body, /__SUBAGENT_DONE_\$LASTEXITCODE__/);
+    });
+  });
+
+  describe("bashToPwshParts (inline env vars + cd prefix)", () => {
+    it("converts a cd prefix and POSIX env-var prefix into pwsh statements", () => {
+      const lines = bashToPwshParts(
+        "cd '/proj' && PI_SUBAGENT_NAME='Worker' PI_SUBAGENT_ALLOWED='scout,researcher' PI_SUBAGENT_AUTO_EXIT=1 pi --session 's.jsonl' 'task'",
+      );
+      assert.equal(lines[0], "Set-Location -LiteralPath '/proj'");
+      assert.equal(lines[1], "$env:PI_SUBAGENT_NAME = 'Worker'");
+      assert.equal(lines[2], "$env:PI_SUBAGENT_ALLOWED = 'scout,researcher'");
+      assert.equal(lines[3], "$env:PI_SUBAGENT_AUTO_EXIT = '1'");
+      assert.equal(lines[4], "pi --session 's.jsonl' 'task'");
+      assert.equal(lines.length, 5);
+    });
+
+    it("strips the trailing bash __SUBAGENT_DONE_ sentinel (sendLongCommand adds Write-Output)", () => {
+      const lines = bashToPwshParts(
+        "PI_X='1' pi --foo; echo '__SUBAGENT_DONE_'$?'__'",
+      );
+      assert.equal(lines[0], "$env:PI_X = '1'");
+      assert.equal(lines[1], "pi --foo");
+      assert.equal(lines.length, 2);
+    });
+
+    it("passes an already-pwsh command through unchanged (harness path)", () => {
+      const cmd = "Set-Location 'C:\\proj'; pi -ne -e 'C:\\ext\\index.ts' 'task'";
+      const lines = bashToPwshParts(cmd);
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0], cmd);
+    });
+
+    it("re-escapes single-quoted env values for pwsh (POSIX \\' → pwsh '')", () => {
+      // In JS source, the bash command string contains the literal POSIX escape:
+      // KEY='it'\''s'  (single-quote, backslash, single-quote, single-quote).
+      const lines = bashToPwshParts("KEY='it'\\''s' pi --foo");
+      assert.equal(lines[0], "$env:KEY = 'it''s'");
+      assert.equal(lines[1], "pi --foo");
+    });
+
+    it("handles a bare command with no env vars or cd prefix", () => {
+      const lines = bashToPwshParts("pi --foo --bar 'baz'");
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0], "pi --foo --bar 'baz'");
+    });
+
+    it("emits a single line for a bare command (no newlines injected)", () => {
+      const lines = bashToPwshParts("pi");
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0], "pi");
     });
   });
 

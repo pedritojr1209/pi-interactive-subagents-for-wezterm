@@ -152,6 +152,152 @@ export function shellEscape(s: string): string {
   return "'" + s.replace(/'/g, "''") + "'";
 }
 
+// ── Bash → pwsh translation ─────────────────────────────────────────────────
+// `index.ts:launchSubagent` builds a single bash-style command string with
+// POSIX env-var prefixes (`KEY='val'`) and a `cd '<path>' &&` prefix, plus
+// a trailing bash sentinel. `sendLongCommand` writes this verbatim into a
+// `.ps1` for pwsh, so we translate here. Commands already in pwsh syntax
+// (e.g. the integration-test harness emits `Set-Location 'x'; pi ...`)
+// contain none of those bash idioms and pass through unchanged.
+
+function isShellSpace(ch: string): boolean {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
+}
+
+function isAssignmentToken(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(value);
+}
+
+function readShellWord(s: string, i: number): { value: string; next: number } | null {
+  while (i < s.length && isShellSpace(s[i])) i++;
+  if (i >= s.length) return null;
+  const start = i;
+  let j = i;
+  let value = "";
+  while (j < s.length) {
+    const ch = s[j];
+    if (isShellSpace(ch)) break;
+    if (ch === "'") {
+      const close = s.indexOf("'", j + 1);
+      if (close === -1) {
+        value += s.slice(j + 1);
+        j = s.length;
+        break;
+      }
+      value += s.slice(j + 1, close);
+      j = close + 1;
+      if (s[j] === "\\" && s[j + 1] === "'") {
+        value += "'";
+        j += 2;
+      }
+    } else if (ch === '"') {
+      const close = s.indexOf('"', j + 1);
+      if (close === -1) {
+        value += s.slice(j + 1);
+        j = s.length;
+        break;
+      }
+      value += s.slice(j + 1, close).replace(/\\(.)/g, "$1");
+      j = close + 1;
+    } else if (ch === "\\") {
+      value += j + 1 < s.length ? s[j + 1] : "";
+      j += 2;
+    } else {
+      value += ch;
+      j += 1;
+    }
+  }
+  return { value, next: j };
+}
+
+function tokenizeShell(
+  s: string,
+): Array<{ value: string; raw: string }> {
+  const tokens: Array<{ value: string; raw: string }> = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && isShellSpace(s[i])) i++;
+    if (i >= s.length) break;
+    const ch = s[i];
+    if (ch === ";") {
+      tokens.push({ value: ";", raw: ";" });
+      i++;
+      continue;
+    }
+    if (ch === "&" || ch === "|") {
+      const op = s[i + 1] === ch ? ch + ch : ch;
+      tokens.push({ value: op, raw: op });
+      i += op.length;
+      continue;
+    }
+    const start = i;
+    const r = readShellWord(s, i);
+    if (!r) break;
+    tokens.push({ value: r.value, raw: s.slice(start, r.next) });
+    i = r.next;
+  }
+  return tokens;
+}
+
+/**
+ * Translate a bash-style launch command (as built by `index.ts`) into
+ * PowerShell statements for the `.ps1` script `sendLongCommand` writes.
+ *
+ * Conversions performed:
+ *   - `cd '<path>' && `  →  `Set-Location -LiteralPath '<pwsh-escaped path>'`
+ *   - `KEY='val'` / `KEY="val"` / `KEY=val` (leading env prefixes)
+ *       →  `$env:KEY = '<pwsh-escaped val>'`
+ *   - trailing `; echo '__SUBAGENT_DONE_'$?'__'` bash sentinel
+ *       →  dropped (sendLongCommand appends its own `Write-Output` sentinel)
+ *
+ * Commands already in pwsh syntax (e.g. the integration-test harness emits
+ * `Set-Location 'x'; pi -ne -e '...' 'task'`) contain no `cd ... &&` prefix,
+ * no `KEY=val` prefix, and no bash sentinel, so they pass through unchanged.
+ */
+function bashToPwshParts(command: string): string[] {
+  command = command.replace(/;\s*echo\s+['"]?__SUBAGENT_DONE_[\s\S]*$/, "");
+  const out: string[] = [];
+  const tokens = tokenizeShell(command);
+  let idx = 0;
+
+  // Lead with `cd '<path>' &&` if present.
+  if (tokens[idx]?.value === "cd" && tokens[idx + 2]?.value === "&&") {
+    const cwdPath = tokens[idx + 1]?.value ?? "";
+    out.push(`Set-Location -LiteralPath ${shellEscape(cwdPath)}`);
+    idx += 3;
+  }
+
+  // Consume leading env-var assignments: KEY='val' / KEY="val" / KEY=val.
+  while (idx < tokens.length && isAssignmentToken(tokens[idx].value)) {
+    const eq = tokens[idx].value.indexOf("=");
+    const key = tokens[idx].value.slice(0, eq);
+    const val = tokens[idx].value.slice(eq + 1);
+    out.push(`$env:${key} = ${shellEscape(val)}`);
+    idx++;
+  }
+
+  // Emit the remainder verbatim (preserving original quoting), stopping only
+  // at the bash sentinel `; echo __SUBAGENT_DONE_...` that sendLongCommand
+  // replaces with its own Write-Output. Other `;` separators (pwsh statement
+  // separators) are kept.
+  const cmdTokens: string[] = [];
+  while (idx < tokens.length) {
+    if (tokens[idx].value === ";") {
+      const after = tokens[idx + 1]?.value;
+      const markerArg = tokens[idx + 2]?.value ?? "";
+      if (after === "echo" && markerArg.startsWith("__SUBAGENT_DONE_")) {
+        break;
+      }
+    }
+    cmdTokens.push(tokens[idx].raw);
+    idx++;
+  }
+  if (cmdTokens.length > 0) {
+    out.push(cmdTokens.join(" "));
+  }
+  return out;
+}
+
 // ── Parent surface ──
 
 /**
@@ -283,7 +429,7 @@ export function sendLongCommand(
   if (options?.scriptPreamble) {
     scriptParts.push(options.scriptPreamble.trimEnd());
   }
-  scriptParts.push(command);
+  scriptParts.push(...bashToPwshParts(command));
   scriptParts.push('Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"');
 
   writeFileSync(scriptPath, scriptParts.join("\n") + "\n", "utf8");
@@ -336,6 +482,7 @@ export const __sendLongCommandTest__ = {
   buildScriptBody(parts: readonly string[]): string {
     return parts.join("\n") + "\n";
   },
+  bashToPwshParts,
   coercePwshScriptPath,
   directionFlags,
 };
