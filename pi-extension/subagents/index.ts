@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { keyHint } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   readdirSync,
@@ -13,7 +13,7 @@ import {
   copyFileSync,
   unlinkSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   isMuxAvailable,
   muxSetupHint,
@@ -169,6 +169,19 @@ function getAgentConfigDir(): string {
   return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 }
 
+/**
+ * Normalize a filesystem path to forward-slash form.
+ *
+ * `path.join` emits backslash separators on Windows, but the tool-extension
+ * and session paths produced by this module are also compared against
+ * forward-slash suffixes (e.g. `endsWith("web-search/index.ts")`) and embedded
+ * in cross-mux shell commands. Node's `fs`/jiti accept forward slashes on every
+ * platform, so canonicalizing to `/` keeps the mapping stable regardless of OS.
+ */
+function toPosixPath(p: string): string {
+  return p.split(sep).join("/");
+}
+
 // ── Runtime tool-extension registration ─────────────────────────────────────
 // `getToolExtensionPath` otherwise only knows a closed set of tool names. Other
 // pi extensions that bundle a tool for subagents (e.g. a project-local
@@ -213,7 +226,7 @@ function getToolExtensionPath(tool: string): string | undefined {
   if (BUILTIN_TOOLS.has(tool)) return undefined;
   // The four spawning tools are registered by THIS extension.
   if ((SPAWNING_TOOLS as readonly string[]).includes(tool)) {
-    return fileURLToPath(import.meta.url);
+    return toPosixPath(fileURLToPath(import.meta.url));
   }
   const extBase = join(getAgentConfigDir(), "extensions");
   const map: Record<string, string> = {
@@ -224,12 +237,18 @@ function getToolExtensionPath(tool: string): string | undefined {
     google_image_search: join(extBase, "google-image-search", "index.ts"),
     safe_bash: join(SUBAGENTS_DIR, "tools", "safe-bash.ts"),
   };
-  // Prefer the built-in path, but fall back to a runtime-registered extension
-  // when that path no longer exists on disk (e.g. a built-in tool extension
-  // was disabled/removed but a project-local extension re-registered it).
+  // A runtime-registered extension (via registerToolExtension) is an explicit
+  // project-local override and always wins.
+  const registered = EXTRA_TOOL_EXTENSIONS.get(tool);
+  if (registered) return toPosixPath(registered);
+  // Otherwise return the canonical path for this known built-in tool extension.
+  // We do NOT gate on existence: applySandboxToParts already guards with its
+  // own existsSync before handing any path to the child process, and the
+  // name->path mapping must be available even when the extension isn't
+  // installed on the current machine (e.g. web_search's canonical location).
   const builtin = map[tool];
-  if (builtin && existsSync(builtin)) return builtin;
-  return EXTRA_TOOL_EXTENSIONS.get(tool);
+  if (builtin) return toPosixPath(builtin);
+  return undefined;
 }
 
 /**
@@ -272,6 +291,10 @@ function parseSessionMode(value: string | undefined): SubagentSessionMode | unde
 }
 
 function parseAgentDefinition(content: string, fallbackName: string): AgentDefinition | null {
+  // Normalize CRLF/CR line endings to LF so the frontmatter regexes match
+  // regardless of platform. Agent .md files authored on Windows carry CRLF,
+  // which would make `^---\n` and the body slice fail to match.
+  content = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const match = content.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return null;
 
@@ -338,7 +361,7 @@ function resolveSubagentPaths(
   const cwdIsFromAgent = !params.cwd && agentDefs?.cwd != null;
   const cwdBase = cwdIsFromAgent ? getAgentConfigDir() : process.cwd();
   const effectiveCwd = rawCwd
-    ? rawCwd.startsWith("/")
+    ? isAbsolute(rawCwd)
       ? rawCwd
       : join(cwdBase, rawCwd)
     : null;
@@ -1276,7 +1299,7 @@ async function launchSubagent(
     : `${roleBlock}\n\n${modeHint}\n\n${params.task}\n\n${summaryInstruction}`;
   // ── Claude Code CLI path ──
   if (agentDefs?.cli === "claude") {
-    const sentinelFile = `/tmp/pi-claude-${id}-done`;
+    const sentinelFile = join(tmpdir(), `pi-claude-${id}-done`);
     const pluginDir = join(SUBAGENTS_DIR, "plugin");
 
     const cmdParts: string[] = [];
@@ -1489,10 +1512,7 @@ async function launchSubagent(
  * the summary from the session file, cleans up the surface,
  * and removes the entry from runningSubagents.
  */
-const CLAUDE_SESSIONS_DIR = join(
-  process.env.HOME ?? "/tmp",
-  ".pi", "agent", "sessions", "claude-code",
-);
+const CLAUDE_SESSIONS_DIR = join(getAgentConfigDir(), "sessions", "claude-code");
 
 function copyClaudeSession(sentinelFile: string): string | null {
   try {
@@ -1501,7 +1521,7 @@ function copyClaudeSession(sentinelFile: string): string | null {
     const transcriptPath = readFileSync(transcriptFile, "utf-8").trim();
     if (!transcriptPath || !existsSync(transcriptPath)) return null;
     mkdirSync(CLAUDE_SESSIONS_DIR, { recursive: true });
-    const filename = transcriptPath.split("/").pop() ?? `claude-${Date.now()}.jsonl`;
+    const filename = basename(transcriptPath) || `claude-${Date.now()}.jsonl`;
     const dest = join(CLAUDE_SESSIONS_DIR, filename);
     copyFileSync(transcriptPath, dest);
     return filename;
