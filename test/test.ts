@@ -2876,9 +2876,9 @@ describe("wezterm.ts:sendLongCommand (pwsh launcher)", () => {
     it("appends the SUBAGENT_DONE sentinel when asked", () => {
       const body = buildScriptBody([
         "pi --foo",
-        'Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"',
+        'Write-Output "__SUBAGENT_DONE_${LASTEXITCODE}__"',
       ]);
-      assert.match(body, /__SUBAGENT_DONE_\$LASTEXITCODE__/);
+      assert.match(body, /__SUBAGENT_DONE_\$\{LASTEXITCODE\}__/);
     });
   });
 

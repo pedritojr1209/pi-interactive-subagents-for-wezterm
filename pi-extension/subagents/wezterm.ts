@@ -7,7 +7,7 @@
  *   tmux split-window -h -d -t <pane>      → wezterm cli split-pane --right --pane-id <id>
  *   tmux send-keys -t <pane> -l <cmd>      → wezterm cli send-text --pane-id <id> --no-paste "<cmd>\r"
  *       Enter
- *   tmux capture-pane -p -t <pane> -S -N   → wezterm cli get-text --pane-id <id> --start-line 0 --end-line N
+ *   tmux capture-pane -p -t <pane> -S -N   → wezterm cli get-text --pane-id <id> --start-line -N --end-line 0
  *   tmux kill-pane -t <pane>               → wezterm cli kill-pane --pane-id <id>
  *   tmux list-panes                        → wezterm cli list --format json
  *
@@ -32,7 +32,7 @@
  *     and invokes it as `pwsh -NoProfile -ExecutionPolicy Bypass -File '<path>'`.
  *     The single-quoted path neutralizes `$`, backtick, and embedded `'`
  *     inside the path so pwsh argument parsing sees it as one literal token.
- *     The trailing `Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"` matches
+ *     The trailing `Write-Output "__SUBAGENT_DONE_${LASTEXITCODE}__"` matches
  *     the bash `echo '__SUBAGENT_DONE_'$?'__'` sentinel used by `tmux.ts`.
  *     See `research/pwsh-launcher-facts.md` (Ticket 4) for the primary-source
  *     notes governing this launcher.
@@ -407,7 +407,7 @@ export function sendCommand(surface: string, command: string): void {
  *
  * Script body is escaped with pwsh single-quote doubling (`shellEscape`) so
  * arbitrary paths/args coming from outside the script don't break parsing.
- * The trailing `Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"` matches the
+ * The trailing `Write-Output "__SUBAGENT_DONE_${LASTEXITCODE}__"` matches the
  * bash `echo '__SUBAGENT_DONE_'$?'__'` sentinel used by `tmux.ts`.
  */
 export function sendLongCommand(
@@ -430,7 +430,7 @@ export function sendLongCommand(
     scriptParts.push(options.scriptPreamble.trimEnd());
   }
   scriptParts.push(...bashToPwshParts(command));
-  scriptParts.push('Write-Output "__SUBAGENT_DONE_$LASTEXITCODE__"');
+  scriptParts.push('Write-Output "__SUBAGENT_DONE_${LASTEXITCODE}__"');
 
   writeFileSync(scriptPath, scriptParts.join("\n") + "\n", "utf8");
 
@@ -495,7 +495,7 @@ export const __sendLongCommandTest__ = {
  * same `__SUBAGENT_DONE_<n>__` regex the tmux path uses. Requires nightly
  * ≥ 20230320-124340-559cb7b0.
  */
-export function readScreen(surface: string, lines = 50): string {
+export function readScreen(surface: string, lines = 500): string {
   requireWezterm();
   return execFileSync(
     "wezterm",
@@ -505,15 +505,13 @@ export function readScreen(surface: string, lines = 50): string {
       "--pane-id",
       surface,
       "--start-line",
-      "0",
-      "--end-line",
-      String(Math.max(1, lines)),
+      String(-lines),
     ],
     { encoding: "utf8" },
   );
 }
 
-export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
+export async function readScreenAsync(surface: string, lines = 500): Promise<string> {
   requireWezterm();
   const { stdout } = await execFileAsync(
     "wezterm",
@@ -523,9 +521,7 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
       "--pane-id",
       surface,
       "--start-line",
-      "0",
-      "--end-line",
-      String(Math.max(1, lines)),
+      String(-lines),
     ],
     { encoding: "utf8" },
   );
