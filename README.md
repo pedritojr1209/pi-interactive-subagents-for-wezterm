@@ -1,8 +1,8 @@
 # pi-interactive-subagents
 
-Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
+Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux or WezTerm panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
 
-**tmux and WezTerm subagents.** Supports native WezTerm multiplexing on Windows alongside tmux on POSIX. See [Acknowledgements](#acknowledgements) for the upstream project.
+**tmux and WezTerm subagents.** Supports native WezTerm multiplexing on Windows 10/11 using native `pwsh` (PowerShell 7+), alongside tmux on POSIX. See [Acknowledgements](#acknowledgements) for the upstream project.
 
 ## Installation & Setup
 
@@ -10,15 +10,22 @@ Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux p
   ```
   pi install git:github.com/pedritojr1209/pi-interactive-subagents-for-wezterm
   ```
+- **Global install (POSIX or Windows):**
+  ```
+  # POSIX — symlinks into ~/.local/bin (or equivalent)
+  npm install -g pi-interactive-subagents
+  # Windows — run in an elevated or user-scoped pwsh
+  npm install -g pi-interactive-subagents
+  ```
 - **Local development / Manual (Windows pwsh):**
   ```powershell
   Copy-Item -Recurse -Force ".\pi-extension\subagents" "$HOME\.pi\agent\extensions\subagents"
   ```
-- **On-the-fly / Ephemeral run:**
+- **On-the-fly / Ephemeral run (from any platform):**
   ```
   pi -e ./pi-extension/subagents/index.ts
   ```
-- **Windows prerequisite:** Run inside WezTerm with `pwsh` as your default shell.
+- **Windows prerequisite:** Run inside WezTerm with `pwsh` (PowerShell 7+) as your default shell. WezTerm sets `$env:WEZTERM_PANE` automatically for every pane it spawns, which the extension uses for multiplexer detection.
 
 ## How it works
 
@@ -194,12 +201,37 @@ Status display is configured via `config.json` in the extension directory (copy 
 ## Mux Configuration
 
 The multiplexer is selected at startup based on `PI_SUBAGENT_MUX`:
-- `PI_SUBAGENT_MUX=wezterm` — force WezTerm surface
-- `PI_SUBAGENT_MUX=tmux` — force tmux surface
-- `PI_SUBAGENT_MUX=auto` (default) — auto-detect: if both `$WEZTERM_PANE` and `$TMUX` are set, `$WEZTERM_PANE` wins
-- unset — auto-detect with `$WEZTERM_PANE` preferred
+
+| Value | Behaviour |
+| ----- | --------- |
+| `PI_SUBAGENT_MUX=wezterm` | Force WezTerm surface (Windows 10/11) |
+| `PI_SUBAGENT_MUX=tmux` | Force tmux surface (POSIX) |
+| `PI_SUBAGENT_MUX=auto` | Auto-detect: `$WEZTERM_PANE` wins over `$TMUX` when both are set |
+| *(unset)* | Same as `auto` — `$WEZTERM_PANE` takes precedence |
+
+Auto-detection precedence when both `$WEZTERM_PANE` and `$TMUX` are set:
+1. `$WEZTERM_PANE` is preferred (WezTerm on Windows).
+2. `$TMUX` is the fallback (tmux on POSIX).
+
+Use `PI_SUBAGENT_MUX=tmux` to override and force tmux even when both are set.
 
 Mux availability requires: env-var set, binary on PATH, and liveness probe (memoized per module load). All three checks run once per module load and are memoized. Failure marks the mux as `available: false` with the per-check breakdown visible in diagnostics.
+
+## Smart BSP Auto-Balancing
+
+When running under WezTerm, the extension picks the optimal pane to split using a smart BSP (binary space partition) heuristic rather than always splitting the parent pane. This keeps the layout balanced as the pane tree grows.
+
+The algorithm (`selectSplitTarget` in `wezterm.ts`):
+
+1. **Same-tab guard:** Only panes in the parent's tab are considered. A pane in a different tab is never selected.
+2. **Largest-area wins:** The pane with the greatest `rows × cols` area is the split target. On an area tie, the first entry in `wezterm cli list` Z-order wins; if the parent is among the tied panes it is preferred so the split stays in place.
+3. **Direction by aspect ratio (2:1 rule + 80-column floor):**
+   - If `cols >= rows * 2` **and** `cols >= 80` → split `--right` (add width to a wide layout).
+   - Otherwise → split `--bottom` (add height to a tall layout).
+
+The 80-column floor prevents a narrow-but-wide pane (e.g. a terminal with very few rows) from being treated as "wide enough" just because `cols >= rows * 2` holds. The result is a self-balancing pane tree that avoids degenerate 1-row-high splits.
+
+The design artifact for this heuristic is `research/pane-split-target.html` — a browser-based throwaway prototype with six guided walkthroughs covering single-pane, parent-largest, other-largest, cross-tab, square-pane, and deeply-nested scenarios.
 
 ## Requirements
 
@@ -215,23 +247,24 @@ tmux new -A -s pi 'pi'
 
 ## Model Inheritance (Ticket 8 / Issue #9)
 
-The `resolveEffectiveModel` function resolves the model loadout in this priority order:
-1. Explicit `params.model` (caller-provided)
-2. Agent frontmatter `model`
-3. Parent context `ctx.model` (inherited provider/id e.g. `openrouter/z-ai/glm-5.2`)
-4. `undefined` (when no source resolves)
+The `resolveEffectiveModel` function resolves the model loadout in this 4-tier priority order:
+1. **Explicit `params.model`** — caller-provided override in the `subagent()` call.
+2. **Agent frontmatter `model`** — the `model:` field in the agent's `.md` definition.
+3. **Parent context `ctx.model`** — inherited provider/id from the parent session (e.g. `openrouter/z-ai/glm-5.2`).
+4. **`undefined`** — when no source resolves, the model is unset and the child inherits whatever default the pi runtime supplies.
 
-This is enforced at spawn time and replayed on resume via the loadout snapshot.
+This is enforced at spawn time and replayed on resume via the loadout snapshot (`<session>.loadout.json`), so a resumed session always gets the same model it started with.
 
 ## Architecture References
 
-- [ADR 0001](docs/adr/0001-mux-dispatcher.md) — Mux dispatcher architecture: PI_SUBAGENT_MUX precedence, auto-detect, and mux availability.
-- [ADR 0002](docs/adr/0002-wezterm-e2e-verification.md) — End-to-end verification: `npm test` (203 unit tests), `npm run test:wezterm` (WezTerm surface integration), and `npm run test:integration:all`.
+- [ADR 0001](docs/adr/0001-mux-dispatcher.md) — Mux dispatcher architecture: `PI_SUBAGENT_MUX` precedence, auto-detect, and mux availability.
+- [ADR 0002](docs/adr/0002-wezterm-e2e-verification.md) — End-to-end verification: `npm test` (227 unit tests), `npm run test:wezterm` (WezTerm surface integration), and `npm run test:integration:all`.
+- `research/pane-split-target.html` — Smart BSP auto-balancing design artifact for WezTerm `selectSplitTarget`.
 
 ## Developer Instructions
 
 Run the test suite:
-- `npm test` — runs 203 unit tests (tmux surface + session model inheritance)
+- `npm test` — runs 227 unit tests (tmux surface + WezTerm surface + session model inheritance)
 - `npm run test:wezterm` — runs WezTerm surface integration tests (requires WezTerm on Windows)
 - `npm run test:integration:all` — runs all integration tests
 

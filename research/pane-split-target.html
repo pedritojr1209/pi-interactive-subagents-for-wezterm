@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>selectSplitTarget — throwaway prototype</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+         font-size: 13px; background: #1e1e2e; color: #cdd6f4;
+         padding: 16px; min-height: 100vh; }
+  h1 { font-size: 14px; color: #89b4fa; margin-bottom: 4px; }
+  .subtitle { color: #6c7086; margin-bottom: 16px; font-size: 12px; }
+  .tab-bar { display: flex; gap: 2px; border-bottom: 1px solid #313244;
+             margin-bottom: 16px; flex-wrap: wrap; }
+  .tab { padding: 5px 12px; cursor: pointer; border-radius: 4px 4px 0 0;
+         background: #313244; color: #a6adc8; user-select: none; }
+  .tab.active { background: #45475a; color: #cdd6f4; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* JSON editor */
+  #json-editor { width: 100%; min-height: 220px; resize: vertical;
+                background: #11111b; color: #a6e3a1;
+                border: 1px solid #313244; border-radius: 4px;
+                font-family: inherit; font-size: 12px; padding: 10px; }
+
+  /* Buttons */
+  button { background: #45475a; color: #cdd6f4; border: 1px solid #585b70;
+           border-radius: 4px; padding: 5px 14px; cursor: pointer;
+           font-family: inherit; font-size: 12px; margin: 4px 4px 0 0; }
+  button:hover { background: #585b70; }
+  button.primary { background: #89b4fa; color: #1e1e2e; border-color: #89b4fa; }
+  button.primary:hover { background: #74a8f7; }
+  button.accent { background: #a6e3a1; color: #1e1e2e; border-color: #a6e3a1; }
+  button.accent:hover { background: #94e09b; }
+
+  /* State dump */
+  #state-dump { background: #11111b; border: 1px solid #313244;
+                border-radius: 4px; padding: 10px; white-space: pre-wrap;
+                font-size: 12px; line-height: 1.5; color: #bac2de;
+                min-height: 80px; max-height: 420px; overflow-y: auto; }
+  .label { color: #89b4fa; }
+  .success { color: #a6e3a1; }
+  .warn    { color: #f9e2af; }
+  .muted   { color: #6c7086; }
+  .dir-right { color: #89b4fa; }
+  .dir-bottom { color: #f38ba8; }
+
+  /* Walkthrough step */
+  .step { background: #181825; border: 1px solid #313244;
+          border-radius: 4px; padding: 10px 14px; margin-bottom: 8px;
+          cursor: pointer; }
+  .step:hover { border-color: #585b70; }
+  .step-head { display: flex; justify-content: space-between; }
+  .step-title { color: #cdd6f4; }
+  .step-badge { font-size: 11px; color: #6c7086; }
+  .step-desc { color: #a6adc8; margin-top: 4px; font-size: 12px; }
+  .step-body { display: none; margin-top: 10px; border-top: 1px solid #313244;
+               padding-top: 10px; }
+  .step.open .step-body { display: block; }
+  .step.open { border-color: #585b70; }
+
+  /* Pane grid visualisation */
+  .pane-grid { display: flex; flex-wrap: wrap; gap: 2px; margin: 8px 0; }
+  .pane-cell { border: 1px solid #45475a; padding: 4px 8px;
+               border-radius: 3px; font-size: 12px; min-width: 60px; }
+  .pane-cell.parent { border-color: #f9e2af; background: #292728; }
+  .pane-cell.target { border-color: #a6e3a1; background: #1e3028; }
+  .pane-cell.other  { color: #6c7086; }
+
+  /* Layout */
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .col { flex: 1; min-width: 280px; }
+  .panel-title { font-size: 12px; color: #6c7086; margin-bottom: 6px;
+                 text-transform: uppercase; letter-spacing: .5px; }
+</style>
+</head>
+<body>
+
+<h1>selectSplitTarget() — logic prototype</h1>
+<p class="subtitle">Throwaway. Run by double-clicking this file in a browser.
+No server required. State lives in memory only.</p>
+
+<div class="tab-bar" id="tab-bar"></div>
+
+<!-- ─── FREE-PLAY ─────────────────────────────────────────────────── -->
+<div class="panel active" id="panel-freeplay">
+  <div class="col">
+    <p class="panel-title">wezterm cli list --format json (paste or edit)</p>
+    <textarea id="json-editor" spellcheck="false"></textarea>
+    <div style="margin-top:8px">
+      <span class="label">parentPaneId:</span>
+      <input id="parent-id" type="text" size="6"
+             style="background:#11111b;color:#cdd6f4;border:1px solid #313244;
+                    border-radius:3px;padding:3px 6px;font-family:inherit;font-size:12px">
+      <button class="primary" id="btn-run">▶ run</button>
+      <button id="btn-reset">reset</button>
+    </div>
+    <p class="panel-title" style="margin-top:14px">output (full state)</p>
+    <div id="state-dump">Press <span class="label">▶ run</span> after setting parentPaneId.</div>
+  </div>
+</div>
+
+<!-- ─── WALKTHROUGHS ─────────────────────────────────────────────── -->
+<div class="panel" id="panel-walkthroughs">
+  <div id="steps-container"></div>
+  <div id="walkthrough-state" style="margin-top:12px"></div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+//  CORE LOGIC — prototype of selectSplitTarget(parentPaneId)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * WezTerm pane shape returned by `wezterm cli list --format json`.
+ */
+interface PaneJSON {
+  window_id: number;
+  tab_id: number;
+  pane_id: string;   // numeric, e.g. "7"
+  workspace: string;
+  size: { rows: number; cols: number; pixel_width: number; pixel_height: number; dpi: number };
+  title: string;
+  cwd: string;
+  cursor_x: number;
+  cursor_y: number;
+  cursor_shape: string;
+  cursor_visibility: string;
+  left_col: number;
+  top_row: number;
+  tab_title: string;
+  window_title: string;
+  is_active: boolean;
+  is_zoomed: boolean;
+  tty_name: string | null;
+}
+
+interface SplitDecision {
+  targetPaneId: string;
+  direction: "--right" | "--bottom";
+  reason: string;
+  considered: {
+    totalPanesInTab: number;
+    candidates: Array<{ paneId: string; rows: number; cols: number; area: number }>;
+    winnerArea: number;
+  };
+}
+
+/**
+ * Find the optimal pane to split, targeting the largest pane in the
+ * parent's tab.  Alternates split direction based on the winning pane's
+ * aspect ratio (cols / rows):
+ *
+ *   - cols >= rows  →  --right   (adds width, relieves wide layout)
+ *   - cols <  rows  →  --bottom  (adds height, relieves tall layout)
+ *
+ * Tie-breaking: first-found in list order (wezterm cli list returns panes
+ * in stable Z-order).
+ *
+ * Returns a SplitDecision; never throws (caller handles empty/null inputs).
+ */
+function selectSplitTarget(
+  panes: PaneJSON[],
+  parentPaneId: string,
+): SplitDecision | null {
+  if (!panes || panes.length === 0) {
+    return null;
+  }
+
+  const parent = panes.find(p => p.paneId === parentPaneId);
+  if (!parent) {
+    return null;
+  }
+
+  const tabId = parent.tab_id;
+  const sameTab = panes.filter(p => p.tab_id === tabId);
+
+  if (sameTab.length === 0) {
+    return null;
+  }
+
+  const candidates = sameTab.map(p => ({
+    paneId: p.pane_id,
+    rows: p.size.rows,
+    cols: p.size.cols,
+    area: p.size.rows * p.size.cols,
+  }));
+
+  const maxArea = Math.max(...candidates.map(c => c.area));
+  const winners = candidates.filter(c => c.area === maxArea);
+  const winner = winners.find(c => c.paneId === parentPaneId) ?? winners[0];
+
+  const direction: "--right" | "--bottom" =
+    winner.cols >= winner.rows ? "--right" : "--bottom";
+
+  return {
+    targetPaneId: winner.paneId,
+    direction,
+    reason: formatReason(winner, direction, sameTab.length, maxArea),
+    considered: { totalPanesInTab: sameTab.length, candidates, winnerArea: maxArea },
+  };
+}
+
+function formatReason(
+  winner: { paneId: string; cols: number; rows: number; area: number },
+  direction: string,
+  panesInTab: number,
+  maxArea: number,
+): string {
+  const ratio = (winner.cols / winner.rows).toFixed(2);
+  return `pane ${winner.paneId} is largest in tab (area=${winner.area}, ${winner.cols}×${winner.rows}, ratio=${ratio}) → ${direction}  [${panesInTab} pane(s) in tab, max area=${maxArea}]`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PRESET DATA — representative scenarios
+// ═══════════════════════════════════════════════════════════════════════════
+
+function demo1(): PaneJSON[] {
+  // Single pane: trivial — splits itself right.
+  return [
+    { window_id:0, tab_id:1, pane_id:"7", workspace:"default",
+      size:{rows:42,cols:168,pixel_width:1344,pixel_height:714,dpi:96},
+      title:"p1", cwd:"/tmp", cursor_x:0, cursor_y:0, cursor_shape:"BlinkingBlock",
+      cursor_visibility:"Visible", left_col:0, top_row:0, tab_title:"",
+      window_title:"w1", is_active:true, is_zoomed:false, tty_name:null },
+  ];
+}
+
+function demo2(): PaneJSON[] {
+  // Parent (p7) is already the largest pane in the tab.
+  // → splits itself, direction based on its aspect ratio.
+  return [
+    { window_id:0, tab_id:5, pane_id:"7",  workspace:"default",
+      size:{rows:42,cols:168,pixel_width:1344,pixel_height:714,dpi:96},
+      title:"parent", cwd:"/tmp", cursor_x:5, cursor_y:36,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:true,
+      is_zoomed:false, tty_name:null },
+    { window_id:0, tab_id:5, pane_id:"11", workspace:"default",
+      size:{rows:21,cols:84,pixel_width:672,pixel_height:357,dpi:96},
+      title:"child1", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:false,
+      is_zoomed:false, tty_name:null },
+    { window_id:0, tab_id:5, pane_id:"12", workspace:"default",
+      size:{rows:21,cols:84,pixel_width:672,pixel_height:357,dpi:96},
+      title:"child2", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:false,
+      is_zoomed:false, tty_name:null },
+  ];
+}
+
+function demo3(): PaneJSON[] {
+  // Parent (p7) is NOT the largest; p19 is bigger.
+  // → target switches to p19; aspect ratio of p19 decides direction.
+  return [
+    { window_id:0, tab_id:5, pane_id:"7",  workspace:"default",
+      size:{rows:20,cols:84,pixel_width:672,pixel_height:400,dpi:96},
+      title:"parent", cwd:"/tmp", cursor_x:5, cursor_y:10,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:true,
+      is_zoomed:false, tty_name:null },
+    { window_id:0, tab_id:5, pane_id:"9",  workspace:"default",
+      size:{rows:10,cols:84,pixel_width:672,pixel_height:200,dpi:96},
+      title:"small", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:false,
+      is_zoomed:false, tty_name:null },
+    { window_id:0, tab_id:5, pane_id:"19", workspace:"default",
+      size:{rows:42,cols:168,pixel_width:1344,pixel_height:714,dpi:96},
+      title:"big-editor", cwd:"/tmp", cursor_x:80, cursor_y:20,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:false,
+      is_zoomed:false, tty_name:null },
+  ];
+}
+
+function demo4(): PaneJSON[] {
+  // Two tabs. parentPaneId=7 is in tab 5; p99 is in a DIFFERENT tab.
+  // → p99 must NOT be selected — we filter by tab first.
+  return [
+    { window_id:0, tab_id:5, pane_id:"7",   workspace:"default",
+      size:{rows:42,cols:168,pixel_width:1344,pixel_height:714,dpi:96},
+      title:"parent", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:true,
+      is_zoomed:false, tty_name:null },
+    { window_id:0, tab_id:9, pane_id:"99",  workspace:"default",
+      size:{rows:80,cols:200,pixel_width:1600,pixel_height:900,dpi:96},
+      title:"huge-other-tab", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w2", is_active:true,
+      is_zoomed:false, tty_name:null },
+  ];
+}
+
+function demo5(): PaneJSON[] {
+  // Aspect-ratio tie: square pane (cols === rows) → --right (>= branch).
+  return [
+    { window_id:0, tab_id:3, pane_id:"1", workspace:"default",
+      size:{rows:40,cols:80,pixel_width:960,pixel_height:480,dpi:96},
+      title:"wide", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:false,
+      is_zoomed:false, tty_name:null },
+    { window_id:0, tab_id:3, pane_id:"2", workspace:"default",
+      size:{rows:40,cols:40,pixel_width:480,pixel_height:480,dpi:96},
+      title:"square-parent", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:true,
+      is_zoomed:false, tty_name:null },
+  ];
+}
+
+function demo6(): PaneJSON[] {
+  // Deeply nested: 6 panes in one tab, one very tall narrow pane.
+  // Tall (rows >> cols) → --bottom.
+  return [
+    { window_id:0, tab_id:2, pane_id:"1", workspace:"default",
+      size:{rows:10,cols:80,pixel_width:800,pixel_height:160,dpi:96},
+      title:"top", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:false,
+      is_zoomed:false, tty_name:null },
+    { window_id:0, tab_id:2, pane_id:"2", workspace:"default",
+      size:{rows:10,cols:80,pixel_width:800,pixel_height:160,dpi:96},
+      title:"mid", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:false,
+      is_zoomed:false, tty_name:null },
+    { window_id:0, tab_id:2, pane_id:"3", workspace:"default",
+      size:{rows:80,cols:20,pixel_width:200,pixel_height:1280,dpi:96},
+      title:"tall-narrow", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:true,
+      is_zoomed:false, tty_name:null },
+    { window_id:0, tab_id:2, pane_id:"4", workspace:"default",
+      size:{rows:30,cols:60,pixel_width:600,pixel_height:480,dpi:96},
+      title:"side", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:false,
+      is_zoomed:false, tty_name:null },
+    { window_id:0, tab_id:2, pane_id:"5", workspace:"default",
+      size:{rows:20,cols:40,pixel_width:400,pixel_height:320,dpi:96},
+      title:"small1", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:false,
+      is_zoomed:false, tty_name:null },
+    { window_id:0, tab_id:2, pane_id:"6", workspace:"default",
+      size:{rows:20,cols:40,pixel_width:400,pixel_height:320,dpi:96},
+      title:"small2", cwd:"/tmp", cursor_x:0, cursor_y:0,
+      cursor_shape:"BlinkingBlock", cursor_visibility:"Visible",
+      left_col:0, top_row:0, tab_title:"", window_title:"w", is_active:false,
+      is_zoomed:false, tty_name:null },
+  ];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  UI
+// ═══════════════════════════════════════════════════════════════════════════
+
+const DEMOS: Record<string, { data: PaneJSON[]; parent: string; label: string }> = {
+  "single-pane":     { data: demo1(), parent: "7",  label: "1 · Single pane" },
+  "parent-largest":  { data: demo2(), parent: "7",  label: "2 · Parent is largest" },
+  "other-largest":   { data: demo3(), parent: "7",  label: "3 · Another pane is largest" },
+  "cross-tab":       { data: demo4(), parent: "7",  label: "4 · Cross-tab filter" },
+  "square-pane":     { data: demo5(), parent: "2",  label: "5 · Square pane → --right" },
+  "deeply-nested":   { data: demo6(), parent: "3",  label: "6 · Deeply nested, tall winner" },
+};
+
+let livePanes: PaneJSON[] = demo2();
+let liveParent: string = "7";
+
+const $editor = document.getElementById("json-editor") as HTMLTextAreaElement;
+const $parent = document.getElementById("parent-id") as HTMLInputElement;
+const $dump   = document.getElementById("state-dump") as HTMLDivElement;
+
+function renderEditor() {
+  $editor.value = JSON.stringify(livePanes, null, 2);
+  $parent.value = liveParent;
+}
+
+function renderState(decision: SplitDecision | null, panes: PaneJSON[], parentId: string): void {
+  const parent = panes.find(p => p.pane_id === parentId);
+  const tabId  = parent ? parent.tab_id : "?";
+  const lines: string[] = [];
+
+  lines.push(`<span class="label">── input ──────────────────────────────</span>`);
+  lines.push(`  parentPaneId : ${esc(parentId)}`);
+  lines.push(`  parent tab_id: ${tabId}`);
+  lines.push(`  panes in tab : ${panes.filter(p => p.tab_id === tabId).length}`);
+  lines.push(`  total panes  : ${panes.length}`);
+  lines.push("");
+
+  lines.push(`<span class="label">── all panes ───────────────────────────</span>`);
+  for (const p of panes) {
+    const inTab = p.tab_id === tabId;
+    const marker = p.pane_id === parentId ? "<span class='warn'> ◀ parent</span>"
+                 : p.pane_id === (decision?.targetPaneId) ? "<span class='success'> ◀ target</span>"
+                 : "";
+    lines.push(`  ${pad(p.pane_id,4)} tab=${pad(String(p.tab_id),2)}  ${r(p.size.rows)}×${c(p.size.cols)}  area=${pad(String(p.size.rows*p.size.cols),5)}  ${inTab ? "":"<span class='muted'>[other tab]</span>"}${marker}`);
+  }
+  lines.push("");
+
+  if (!decision) {
+    lines.push(`<span class="warn">── decision: null (parent not found or no panes in tab)</span>`);
+  } else {
+    lines.push(`<span class="success">── decision ──────────────────────────────</span>`);
+    lines.push(`  targetPaneId : ${esc(decision.targetPaneId)}`);
+    const dirClass = decision.direction === "--right" ? "dir-right" : "dir-bottom";
+    lines.push(`  direction    : <span class="${dirClass}">${esc(decision.direction)}</span>`);
+    lines.push(`  reason       : ${esc(decision.reason)}`);
+    lines.push("");
+    lines.push(`<span class="label">── considered.candidates (sorted by area desc) ──</span>`);
+    for (const c of [...decision.considered.candidates].sort((a,b) => b.area - a.area)) {
+      const w = c.paneId === decision.targetPaneId ? " ◀ winner" : "";
+      lines.push(`  ${pad(c.paneId,4)}  ${r(c.rows)}×${c(c.cols)}  area=${pad(String(c.area),5)}${w}`);
+    }
+    lines.push(`  max area     : ${decision.considered.winnerArea}`);
+  }
+
+  $dump.innerHTML = lines.join("\n");
+
+  function esc(s: string) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function pad(s: string, n: number) { return s + " ".repeat(Math.max(0, n - s.length)); }
+  function r(n: number) { return String(n).padStart(3); }
+  function c(n: number) { return String(n).padStart(3); }
+}
+
+function runDecision(): void {
+  try {
+    const parsed = JSON.parse($editor.value) as PaneJSON[];
+    const pid    = $parent.value.trim();
+    livePanes = parsed;
+    liveParent = pid;
+    const d = selectSplitTarget(parsed, pid);
+    renderState(d, parsed, pid);
+  } catch (e: any) {
+    $dump.innerHTML = `<span class="warn">parse error: ${esc(e.message)}</span>`;
+  }
+}
+
+function loadDemo(key: string): void {
+  const d = DEMOS[key];
+  livePanes = JSON.parse(JSON.stringify(d.data)); // deep clone
+  liveParent = d.parent;
+  renderEditor();
+  runDecision();
+}
+
+// Tab bar
+const tabBar = document.getElementById("tab-bar") as HTMLDivElement;
+const tabDefs = [
+  { id: "freeplay",    label: "▶ free-play" },
+  { id: "walkthroughs", label: "? walkthroughs" },
+];
+tabDefs.forEach((t, i) => {
+  const el = document.createElement("div");
+  el.className = "tab" + (i === 0 ? " active" : "");
+  el.textContent = t.label;
+  el.dataset.tab = t.id;
+  el.addEventListener("click", () => switchTab(t.id));
+  tabBar.appendChild(el);
+});
+
+function switchTab(id: string): void {
+  document.querySelectorAll(".tab").forEach((el: any) => {
+    el.classList.toggle("active", el.dataset.tab === id);
+  });
+  document.querySelectorAll(".panel").forEach((el: any) => {
+    el.classList.toggle("active", el.id === "panel-" + id);
+  });
+}
+
+// Free-play buttons
+const btnRun   = document.getElementById("btn-run");
+const btnReset = document.getElementById("btn-reset");
+btnRun!.addEventListener("click", runDecision);
+btnReset!.addEventListener("click", () => loadDemo("parent-largest"));
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  WALKTHROUGHS — tabbed guided cases
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface Step {
+  title: string;
+  desc: string;
+  build: () => PaneJSON[];
+  parent: string;
+  expected: (d: SplitDecision | null) => string;
+}
+
+const steps: Step[] = [
+  {
+    title: "Single pane — trivial",
+    desc: "There is only one pane in the tab. It is both parent and winner. " +
+          "cols=168 ≥ rows=42 → --right.",
+    build: demo1, parent: "7",
+    expected: d => d
+      ? `target=p7, direction=--right (only pane, wide)`
+      : "null — unexpected",
+  },
+  {
+    title: "Parent is largest — self-split",
+    desc: "p7 (168×42, area=7056) is the biggest. It wins and is " +
+          "also the parent, so we split it in place. 168≥42 → --right.",
+    build: demo2, parent: "7",
+    expected: d => d
+      ? `target=p7, direction=--right (parent=self, cols≥rows)`
+      : "null — unexpected",
+  },
+  {
+    title: "Another pane is largest — target switches",
+    desc: "p7 is only 20×84 (area=1680). p19 is 42×168 (area=7056) — " +
+          "the clear winner. We split p19 instead of the parent. p19 is wide → --right.",
+    build: demo3, parent: "7",
+    expected: d => d
+      ? `target=p19, direction=--right (winner is wide, not parent)`
+      : "null — unexpected",
+  },
+  {
+    title: "Cross-tab guard",
+    desc: "p99 lives in tab 9. The parent p7 is in tab 5. Even though p99 " +
+          "is far larger, it MUST NOT be selected — it's a different tab.",
+    build: demo4, parent: "7",
+    expected: d => d
+      ? `target=p7, direction=--right (p99 in tab 9 is excluded)`
+      : "null — unexpected",
+  },
+  {
+    title: "Square pane — direction tie-break",
+    desc: "p2 is 40×40 (cols === rows). cols >= rows is true, so --right " +
+          "wins. This documents the convention for square cells.",
+    build: demo5, parent: "2",
+    expected: d => d
+      ? `target=p2, direction=--right (square → >= branch)`
+      : "null — unexpected",
+  },
+  {
+    title: "Deeply nested — tall narrow wins",
+    desc: "Six panes in tab 2. p3 is 80 rows × 20 cols (area=1600, ratio=0.25) — " +
+          "very tall. Winner → --bottom to add height.",
+    build: demo6, parent: "3",
+    expected: d => d
+      ? `target=p3, direction=--bottom (winner is tall, ratio=0.25)`
+      : "null — unexpected",
+  },
+];
+
+const stepsContainer = document.getElementById("steps-container") as HTMLDivElement;
+const wtState        = document.getElementById("walkthrough-state") as HTMLDivElement;
+
+function renderStep(stepIdx: number): void {
+  const step = steps[stepIdx];
+  const panes = step.build();
+  const d = selectSplitTarget(panes, step.parent);
+
+  // State dump
+  const parent = panes.find(p => p.pane_id === step.parent);
+  const tabId  = parent ? parent.tab_id : "?";
+
+  const lines: string[] = [];
+  lines.push(`<span class="label">── case ${stepIdx + 1}/${steps.length}: ${step.title} ──</span>`);
+  lines.push(`  parentPaneId : ${step.parent}  (tab_id=${tabId})`);
+  lines.push("");
+
+  for (const p of panes) {
+    const inTab  = p.tab_id === tabId;
+    const marker = p.pane_id === step.parent ? "<span class='warn'> ◀ parent</span>"
+                 : p.pane_id === (d?.targetPaneId) ? "<span class='success'> ◀ target</span>"
+                 : "";
+    lines.push(`  ${p.pane_id.padStart(4)} tab=${String(p.tab_id).padStart(2)}  rows=${String(p.size.rows).padStart(3)}  cols=${String(p.size.cols).padStart(3)}  area=${String(p.size.rows*p.size.cols).padStart(5)}  ${inTab ? "":"<span class='muted'>[other tab]</span>"}${marker}`);
+  }
+
+  if (!d) {
+    lines.push(`\n<span class="warn">result: null</span>`);
+  } else {
+    lines.push(`\n<span class="success">targetPaneId : ${d.targetPaneId}</span>`);
+    const cls = d.direction === "--right" ? "dir-right" : "dir-bottom";
+    lines.push(`direction     : <span class="${cls}">${d.direction}</span>`);
+    lines.push(`reason        : ${d.reason}`);
+    lines.push(`\n<span class="muted">expected: ${step.expected(d)}</span>`);
+  }
+
+  wtState.innerHTML = `<div id="state-dump">${lines.join("\n")}</div>`;
+  renderPaneGrid(wtState, panes, tabId, step.parent, d?.targetPaneId);
+}
+
+function renderPaneGrid(
+  container: HTMLElement,
+  panes: PaneJSON[],
+  tabId: number,
+  parentId: string,
+  targetId: string | undefined,
+): void {
+  const sameTab = panes.filter(p => p.tab_id === tabId);
+  const maxArea = Math.max(...sameTab.map(p => p.size.rows * p.size.cols));
+  const maxCols = Math.max(...sameTab.map(p => p.size.cols));
+  const maxRows = Math.max(...sameTab.map(p => p.size.rows));
+
+  const grid = document.createElement("div");
+  grid.className = "pane-grid";
+  grid.style.gridTemplateColumns = `repeat(${Math.max(maxCols, 1)}, 1fr)`;
+
+  for (const p of sameTab) {
+    const cell = document.createElement("div");
+    const areaFrac = ((p.size.rows * p.size.cols) / maxArea * 100).toFixed(0);
+    cell.className = "pane-cell" +
+      (p.pane_id === parentId ? " parent" : "") +
+      (p.pane_id === targetId ? " target" : " other");
+    cell.style.flex = `${p.size.cols} ${p.size.rows} 0%`;
+    cell.style.minWidth  = `${p.size.cols * 8}px`;
+    cell.style.minHeight = `${p.size.rows * 14}px`;
+    cell.innerHTML =
+      `<b>p${p.pane_id}</b><br>` +
+      `<span class="muted">${p.size.cols}×${p.size.rows}</span><br>` +
+      `<span class="muted">${areaFrac}%</span>`;
+    grid.appendChild(cell);
+  }
+
+  // Remove old grid if present
+  const old = container.querySelector(".pane-grid");
+  if (old) old.remove();
+  container.insertBefore(grid, container.firstChild);
+}
+
+steps.forEach((step, i) => {
+  const el = document.createElement("div");
+  el.className = "step";
+  el.innerHTML =
+    `<div class="step-head">` +
+    `  <span class="step-title">${i+1}. ${step.title}</span>` +
+    `  <span class="step-badge">click to expand</span>` +
+    `</div>` +
+    `<div class="step-desc">${step.desc}</div>` +
+    `<div class="step-body" id="step-body-${i}"></div>`;
+  el.addEventListener("click", () => {
+    const wasOpen = el.classList.contains("open");
+    document.querySelectorAll(".step").forEach(s => s.classList.remove("open"));
+    if (!wasOpen) {
+      el.classList.add("open");
+      const body = document.getElementById(`step-body-${i}`)!;
+      // Lazy render
+      if (!body.dataset.rendered) {
+        const panes = step.build();
+        const d = selectSplitTarget(panes, step.parent);
+        const parent = panes.find(p => p.pane_id === step.parent);
+        const tabId  = parent ? parent.tab_id : "?";
+
+        // Inline mini state dump inside the step
+        const dump = document.createElement("div");
+        dump.id = "state-dump";
+        const lines: string[] = [];
+        for (const p of panes) {
+          const m = p.pane_id === step.parent ? " ◀ parent"
+                  : p.pane_id === d?.targetPaneId ? " ◀ target" : "";
+          lines.push(`${p.pane_id.padStart(4)}  ${String(p.size.rows).padStart(3)}×${String(p.size.cols).padStart(3)}  area=${String(p.size.rows*p.size.cols).padStart(5)}${m}`);
+        }
+        if (d) {
+          const cls = d.direction === "--right" ? "dir-right" : "dir-bottom";
+          lines.push(`\n→ target: <span class="success">${d.targetPaneId}</span>  direction: <span class="${cls}">${d.direction}</span>`);
+        }
+        dump.innerHTML = lines.join("\n");
+        body.appendChild(dump);
+
+        renderPaneGrid(body, panes, tabId, step.parent, d?.targetPaneId);
+        body.dataset.rendered = "1";
+      }
+    }
+  });
+  stepsContainer.appendChild(el);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BOOT
+// ═══════════════════════════════════════════════════════════════════════════
+
+renderEditor();
+runDecision();
+</script>
+</body>
+</html>
