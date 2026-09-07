@@ -319,6 +319,32 @@ export function parentPane(): string | undefined {
  * and "up" both produce a new pane positioned before the source — that's
  * the closest semantic match in wezterm's flat flag space.
  */
+export interface WezTermPane {
+  pane_id: string;
+  tab_id: number;
+  size: { rows: number; cols: number; pixel_width: number; pixel_height: number; dpi: number };
+  workspace: string;
+  title: string;
+  cwd: string;
+  window_id: number;
+  is_active: boolean;
+  is_zoomed: boolean;
+  left_col: number;
+  top_row: number;
+  tab_title: string;
+  window_title: string;
+  cursor_x: number;
+  cursor_y: number;
+  cursor_shape: string;
+  cursor_visibility: string;
+  tty_name: string | null;
+}
+
+export interface SplitTargetResult {
+  targetPaneId: string;
+  direction: "--right" | "--bottom";
+}
+
 function directionFlags(direction: "left" | "right" | "up" | "down"): string[] {
   switch (direction) {
     case "left":
@@ -333,15 +359,96 @@ function directionFlags(direction: "left" | "right" | "up" | "down"): string[] {
 }
 
 /**
- * Create a new subagent pane as a right split off the parent pi pane.
- * WezTerm panes are anonymous in the CLI (no per-pane title field), so the
- * `name` parameter is cosmetic only and is ignored — matching `tmux.ts`
- * where it is also unused. The pi process inside the pane sets its own
- * title via OSC escape sequences.
+ * Choose the optimal pane to split and the direction for the split.
+ *
+ * Selection rules (in priority order):
+ *   1. Filter to panes in the same tab as the parent pane (cross-tab guard).
+ *   2. Select the pane with the largest area (rows * cols).  On a tie the
+ *      first entry in list order wins (stable wezterm Z-order).
+ *   3. Prefer the parent pane itself when it ties for largest area, so we
+ *      do not re-parent the split unnecessarily.
+ *   4. Direction is determined by the winning pane's terminal aspect ratio:
+ *        cols >= rows * 2 && cols >= 80  →  "--right"
+ *        otherwise                        →  "--bottom"
+ *
+ * Terminal font cells are ~1:2 (taller than wide), so a pane is only
+ * "wide" when its column count is at least double its row count and at
+ * least 80 columns wide.  In that case we add width (--right); otherwise
+ * we add height (--bottom).
+ *
+ * Returns null when `panes` is empty or `parentPaneId` is not found.
+ */
+export function selectSplitTarget(
+  panes: WezTermPane[],
+  parentPaneId: string,
+): SplitTargetResult | null {
+  if (!panes || panes.length === 0) return null;
+
+  const parent = panes.find((p) => String(p.pane_id) === String(parentPaneId));
+  if (!parent) return null;
+
+  const sameTab = panes.filter((p) => p.tab_id === parent.tab_id);
+  if (sameTab.length === 0) return null;
+
+  let best: WezTermPane = sameTab[0];
+  let bestArea = best.size.rows * best.size.cols;
+  let bestIsParent = String(best.pane_id) === String(parentPaneId);
+
+  for (let i = 1; i < sameTab.length; i++) {
+    const p = sameTab[i];
+    const area = p.size.rows * p.size.cols;
+    const isParent = String(p.pane_id) === String(parentPaneId);
+    if (area > bestArea || (area === bestArea && isParent && !bestIsParent)) {
+      best = p;
+      bestArea = area;
+      bestIsParent = isParent;
+    }
+  }
+
+  const wideEnough = best.size.cols >= best.size.rows * 2 && best.size.cols >= 80;
+  const direction: "--right" | "--bottom" = wideEnough ? "--right" : "--bottom";
+
+  return {
+    targetPaneId: String(best.pane_id),
+    direction,
+  };
+}
+
+/**
+ * Parse `wezterm cli list --format json` and return typed pane objects.
+ * Returns an empty array when the CLI returns no panes or on parse failure.
+ */
+export function listPanes(): WezTermPane[] {
+  try {
+    const raw = execFileSync("wezterm", ["cli", "list", "--format", "json"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    if (!raw) return [];
+    return JSON.parse(raw) as WezTermPane[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Map our 4-direction vocabulary onto wezterm's `--left/--right/--top/--bottom`.
+ * Tmux uses `-h/-v/-b`; wezterm uses `--left/--right/--top/--bottom`. There
+ * is no WezTerm CLI flag equivalent to tmux's `-b` (split-before), so "left"
+ * and "up" both produce a new pane positioned before the source — that's
+ * the closest semantic match in wezterm's flat flag space.
  */
 export function createSurface(name: string): string {
   void name;
-  return createSurfaceSplit(name, "right", parentPane());
+  const parent = parentPane();
+  const panes = listPanes();
+  const decision = panes.length > 0 && parent ? selectSplitTarget(panes, parent) : null;
+  if (decision) {
+    const dir: "left" | "right" | "up" | "down" =
+      decision.direction === "--right" ? "right" : "down";
+    return createSurfaceSplit(name, dir, decision.targetPaneId);
+  }
+  return createSurfaceSplit(name, "right", parent);
 }
 
 /**

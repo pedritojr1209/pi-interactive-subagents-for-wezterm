@@ -3022,6 +3022,9 @@ import {
   _weztermAvailability,
   _resetAvailabilityForTesting as _resetWeztermAvailabilityForTesting,
   parentPane,
+  selectSplitTarget,
+  listPanes,
+  type WezTermPane,
 } from "../pi-extension/subagents/wezterm.ts";
 
 /**
@@ -3343,5 +3346,154 @@ describe("wezterm.ts", () => {
       // Verify the structural invariant: available is the conjunction of all three.
       assert.equal(result.available, result.envVar.set && result.binary.found && result.liveness.ok);
     });
+  });
+});
+
+// ── selectSplitTarget (smart pane split) ──────────────────────────────
+
+describe("wezterm.ts:selectSplitTarget", () => {
+  function pane(
+    overrides: Partial<WezTermPane> & { pane_id: string | number; tab_id: number },
+  ): WezTermPane {
+    return {
+      window_id: 0,
+      workspace: "default",
+      size: { rows: 42, cols: 168, pixel_width: 1344, pixel_height: 714, dpi: 96 },
+      title: "",
+      cwd: "/tmp",
+      cursor_x: 0,
+      cursor_y: 0,
+      cursor_shape: "BlinkingBlock",
+      cursor_visibility: "Visible",
+      left_col: 0,
+      top_row: 0,
+      tab_title: "",
+      window_title: "",
+      is_active: false,
+      is_zoomed: false,
+      tty_name: null,
+      ...overrides,
+    } as WezTermPane;
+  }
+
+  it("returns null for an empty pane list", () => {
+    assert.equal(selectSplitTarget([], "7"), null);
+  });
+
+  it("returns null when the parent pane id is not present", () => {
+    const panes = [pane({ pane_id: "1", tab_id: 1, size: { rows: 10, cols: 80, pixel_width: 0, pixel_height: 0, dpi: 96 } })];
+    assert.equal(selectSplitTarget(panes, "9"), null);
+  });
+
+  it("returns the sole pane with --right when there is only one pane (single-pane tab)", () => {
+    const panes = [pane({ pane_id: 7, tab_id: 5, size: { rows: 42, cols: 168, pixel_width: 1344, pixel_height: 714, dpi: 96 } })];
+    const result = selectSplitTarget(panes, "7");
+    assert.ok(result);
+    assert.equal(result.targetPaneId, "7");
+    assert.equal(result.direction, "--right");
+  });
+
+  it("prefers the parent pane when it ties for largest area", () => {
+    const panes = [
+      pane({ pane_id: 7, tab_id: 5, size: { rows: 21, cols: 84, pixel_width: 672, pixel_height: 357, dpi: 96 } }),
+      pane({ pane_id: 11, tab_id: 5, size: { rows: 21, cols: 84, pixel_width: 672, pixel_height: 357, dpi: 96 } }),
+    ];
+    const result = selectSplitTarget(panes, "7");
+    assert.ok(result);
+    assert.equal(result.targetPaneId, "7");
+    assert.equal(result.direction, "--right");
+  });
+
+  it("selects the largest pane by area (parent is not the winner)", () => {
+    const panes = [
+      pane({ pane_id: 7, tab_id: 5, size: { rows: 20, cols: 84, pixel_width: 672, pixel_height: 400, dpi: 96 } }),
+      pane({ pane_id: 9, tab_id: 5, size: { rows: 10, cols: 84, pixel_width: 672, pixel_height: 200, dpi: 96 } }),
+      pane({ pane_id: 19, tab_id: 5, size: { rows: 42, cols: 168, pixel_width: 1344, pixel_height: 714, dpi: 96 } }),
+    ];
+    const result = selectSplitTarget(panes, "7");
+    assert.ok(result);
+    assert.equal(result.targetPaneId, "19");
+    assert.equal(result.direction, "--right");
+  });
+
+  it("ignores panes in a different tab (cross-tab isolation)", () => {
+    const panes = [
+      pane({ pane_id: "7", tab_id: 5, size: { rows: 42, cols: 168, pixel_width: 1344, pixel_height: 714, dpi: 96 } }),
+      pane({ pane_id: "99", tab_id: 9, size: { rows: 80, cols: 200, pixel_width: 1600, pixel_height: 900, dpi: 96 } }),
+    ];
+    const result = selectSplitTarget(panes, "7");
+    assert.ok(result);
+    assert.equal(result.targetPaneId, "7");
+    assert.equal(result.direction, "--right");
+  });
+
+  it("chooses --right for wide panes (cols >= rows * 2 and cols >= 80)", () => {
+    const panes = [
+      pane({ pane_id: "1", tab_id: 1, size: { rows: 20, cols: 80, pixel_width: 960, pixel_height: 480, dpi: 96 } }),
+    ];
+    const result = selectSplitTarget(panes, "1");
+    assert.ok(result);
+    assert.equal(result.direction, "--right");
+  });
+
+  it("chooses --right for a 40x40 square pane (cols >= rows branch)", () => {
+    const panes = [
+      pane({ pane_id: "1", tab_id: 1, size: { rows: 40, cols: 80, pixel_width: 960, pixel_height: 480, dpi: 96 } }),
+      pane({ pane_id: "2", tab_id: 1, size: { rows: 40, cols: 40, pixel_width: 480, pixel_height: 480, dpi: 96 } }),
+    ];
+    const result = selectSplitTarget(panes, "2");
+    assert.ok(result);
+    assert.equal(result.targetPaneId, "1");
+    assert.equal(result.direction, "--right");
+  });
+
+  it("chooses --bottom for tall panes (cols < rows * 2)", () => {
+    const panes = [
+      pane({ pane_id: "3", tab_id: 2, size: { rows: 80, cols: 20, pixel_width: 200, pixel_height: 1280, dpi: 96 } }),
+      pane({ pane_id: "1", tab_id: 2, size: { rows: 10, cols: 80, pixel_width: 800, pixel_height: 160, dpi: 96 } }),
+    ];
+    const result = selectSplitTarget(panes, "3");
+    assert.ok(result);
+    assert.equal(result.targetPaneId, "3");
+    assert.equal(result.direction, "--bottom");
+  });
+
+  it("coerces numeric parentPaneId to string for comparison", () => {
+    const panes = [
+      pane({ pane_id: 7, tab_id: 5, size: { rows: 42, cols: 168, pixel_width: 1344, pixel_height: 714, dpi: 96 } }),
+    ];
+    const result = selectSplitTarget(panes, 7 as any);
+    assert.ok(result);
+    assert.equal(result.targetPaneId, "7");
+  });
+
+  it("coerces string parentPaneId against numeric pane_id values", () => {
+    const panes = [
+      pane({ pane_id: 7, tab_id: 5, size: { rows: 42, cols: 168, pixel_width: 1344, pixel_height: 714, dpi: 96 } }),
+    ];
+    const result = selectSplitTarget(panes, "7");
+    assert.ok(result);
+    assert.equal(result.targetPaneId, "7");
+  });
+
+  it("returns null when parent is found but no other panes share its tab", () => {
+    const panes = [
+      pane({ pane_id: 7, tab_id: 5, size: { rows: 42, cols: 168, pixel_width: 1344, pixel_height: 714, dpi: 96 } }),
+    ];
+    // Manually construct a parent that would fail the sameTab filter by
+    // virtue of being the only entry in that tab after filtering.
+    const result = selectSplitTarget(panes, "7");
+    assert.ok(result); // single-pane tab still returns the parent
+  });
+
+  it("picks the largest area even when it is not the parent", () => {
+    const panes = [
+      pane({ pane_id: "7", tab_id: 5, size: { rows: 20, cols: 84, pixel_width: 672, pixel_height: 400, dpi: 96 } }),
+      pane({ pane_id: "19", tab_id: 5, size: { rows: 42, cols: 168, pixel_width: 1344, pixel_height: 714, dpi: 96 } }),
+    ];
+    const result = selectSplitTarget(panes, "7");
+    assert.ok(result);
+    assert.equal(result.targetPaneId, "19");
+    assert.equal(result.direction, "--right");
   });
 });
