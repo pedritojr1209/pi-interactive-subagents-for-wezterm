@@ -1346,7 +1346,22 @@ describe("subagent discovery", () => {
   it("getToolExtensionPath maps custom tools and skips built-ins", () => {
     assert.equal(testApi.getToolExtensionPath("read"), undefined);
     assert.equal(testApi.getToolExtensionPath("bash"), undefined);
-    assert.ok(testApi.getToolExtensionPath("web_search")?.endsWith("web-search/index.ts"));
+    assert.ok(
+      testApi.getToolExtensionPath("web_search")?.endsWith("pi-web-access/index.ts"),
+      "expected web_search to map to pi-web-access",
+    );
+    assert.ok(
+      testApi.getToolExtensionPath("fetch_content")?.endsWith("pi-web-access/index.ts"),
+      "expected fetch_content to map to pi-web-access",
+    );
+    assert.ok(
+      testApi.getToolExtensionPath("source_check")?.endsWith("pi-web-access/index.ts"),
+      "expected source_check to map to pi-web-access",
+    );
+    assert.ok(
+      testApi.getToolExtensionPath("web_fetch")?.endsWith("web-fetch/index.ts"),
+      "expected web_fetch to retain legacy fallback",
+    );
     assert.ok(testApi.getToolExtensionPath("safe_bash")?.endsWith("tools/safe-bash.ts"));
     // Spawning tools are registered by this extension itself.
     assert.ok(testApi.getToolExtensionPath("subagent")?.endsWith("index.ts"));
@@ -1478,6 +1493,38 @@ describe("subagent discovery", () => {
         { artifactDir: d, name: "fork" },
       );
       assert.deepEqual(parts, []);
+    });
+  });
+
+  it("applySandboxToParts deduplicates extension flags for tools sharing the same pi-web-access entrypoint", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "worker",
+          toolAllowlist: "web_search,fetch_content",
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: false,
+          cwd: null,
+          agentDir: null,
+        },
+        { artifactDir: d, name: "worker" },
+      );
+      const eFlags = [];
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i] === "-e") eFlags.push(parts[i + 1]);
+      }
+      const piWebAccessFlags = eFlags.filter((flag) => flag.includes("pi-web-access"));
+      assert.equal(
+        piWebAccessFlags.length,
+        1,
+        "expected exactly one -e flag for pi-web-access despite multiple tools mapping to it",
+      );
     });
   });
 

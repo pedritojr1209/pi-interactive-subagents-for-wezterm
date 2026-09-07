@@ -64,6 +64,8 @@ import {
 /** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 
+const piWebAccess = join(getAgentConfigDir(), "npm", "node_modules", "pi-web-access", "index.ts");
+
 // Survive /reload: clear timers and abort poll loops from the previous module load.
 // /reload re-imports this file, giving fresh module-level state, but closures from
 // the old module keep running. See https://github.com/HazAT/pi-interactive-subagents/issues/5
@@ -230,7 +232,10 @@ function getToolExtensionPath(tool: string): string | undefined {
   }
   const extBase = join(getAgentConfigDir(), "extensions");
   const map: Record<string, string> = {
-    web_search: join(extBase, "web-search", "index.ts"),
+    web_search: piWebAccess,
+    fetch_content: piWebAccess,
+    source_check: piWebAccess,
+    get_search_content: piWebAccess,
     web_fetch: join(extBase, "web-fetch", "index.ts"),
     video_extract: join(extBase, "video-extract", "index.ts"),
     youtube_search: join(extBase, "youtube-search", "index.ts"),
