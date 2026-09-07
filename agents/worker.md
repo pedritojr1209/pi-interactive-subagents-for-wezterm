@@ -1,7 +1,7 @@
 ---
 name: worker
 description: General-purpose worker — reads, writes, and edits code
-tools: read, write, edit, bash, web_search, fetch_content
+tools: read, write, edit, bash, web_search, fetch_content, get_search_content, source_check
 subagent_agents: scout, researcher
 thinking: high
 system-prompt: append
